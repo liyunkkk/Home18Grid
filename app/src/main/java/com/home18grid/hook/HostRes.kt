@@ -23,6 +23,9 @@ object HostRes {
 
     fun layout(context: Context, name: String): Int = idOf(context, "layout", name)
 
+    /** View id（R.id.xxx），FolderCling 用 findViewById 取动画用的 FolderIcon */
+    fun viewId(context: Context, name: String): Int = idOf(context, "id", name)
+
     fun drawable(context: Context, name: String): Drawable? = runCatching {
         val resId = idOf(context, "drawable", name)
         if (resId == 0) null else context.resources.getDrawable(resId, context.theme)

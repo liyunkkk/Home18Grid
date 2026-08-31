@@ -35,6 +35,7 @@ object LayoutHook {
         hookFolderIconSizes(cl)
         hookIconContainerSpan(cl)
         hookPreviewContainer(cl)
+        hookClingLayout(cl)
     }
 
     // ------------------------------------------------------------------
@@ -125,6 +126,43 @@ object LayoutHook {
                 }
             )
         }
+
+        /**
+         * createOrRemoveView2 才是 loadItemIcons / onIconRemoved / rebindInfo
+         * 实际走的那条路，而它开头会按 `this is FolderIcon2x2_9` 把
+         * mItemsMaxCount / mLargeIconNum / mLargeIconNum2 重新写回 12/8/8
+         * （ENH 补丁版还会看 SmaliDedicatedSettingManager4.mRealLargeFolder）。
+         *
+         * 只在之后补写数量是没用的：同一个方法里紧接着就用 getItemsMaxCount()
+         * 算出该建几个子 View，并调 addItemOnclickListener 按 mLargeIconNum2
+         * 决定哪些图标可直接点击。所以这里整段接管：
+         *   先按 18 宫格写好数量，再调 createOrRemoveView()——
+         *   它是 createOrRemoveView2 去掉「重置数量」那一段后剩下的同样逻辑
+         *   （diff 子 View 数量 + addItemOnclickListener），不碰任何计数字段。
+         */
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                icon2x2, "createOrRemoveView2",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val icon = param.thisObject as? View ?: return
+                        val info = runCatching {
+                            XposedHelpers.getObjectField(icon, "mInfo")
+                        }.getOrNull() ?: return
+                        if (DataHook.itemTypeOf(info) != Const.FOLDER_18_GRID) return
+
+                        param.result = null
+                        applyIfMatched(icon)
+                        runCatching { XposedHelpers.callMethod(icon, "createOrRemoveView") }
+                            .onFailure {
+                                XposedBridge.log("[${Const.TAG}] createOrRemoveView failed: $it")
+                            }
+                    }
+                }
+            )
+        }.onFailure {
+            XposedBridge.log("[${Const.TAG}] createOrRemoveView2 hook failed: $it")
+        }
     }
 
     private fun applyIfMatched(icon: View) {
@@ -135,8 +173,9 @@ object LayoutHook {
 
         // 三个 setter 都是 protected final，用 callMethod 反射调用
         runCatching {
-            XposedHelpers.callMethod(icon, "setMLargeIconNum", Const.GRID_COUNT)
-            XposedHelpers.callMethod(icon, "setMItemsMaxCount", Const.GRID_COUNT)
+            XposedHelpers.callMethod(icon, "setMLargeIconNum", Const.LARGE_COUNT)
+            XposedHelpers.callMethod(icon, "setMLargeIconNum2", Const.LARGE_COUNT)
+            XposedHelpers.callMethod(icon, "setMItemsMaxCount", Const.MAX_COUNT)
             XposedHelpers.callMethod(icon, "setMIconColumCount", Const.GRID_COLUMNS)
         }.onFailure {
             XposedBridge.log("[${Const.TAG}] FolderIcon2x2 size setters failed: $it")
@@ -155,17 +194,17 @@ object LayoutHook {
      * BaseFolderIconPreviewContainer2X2 上（protected final）。
      */
     fun applyContainerSize(container: View) {
-        runCatching {
-            XposedHelpers.callMethod(container, "setMLargeIconNum", Const.GRID_COUNT)
-            XposedHelpers.callMethod(container, "setMItemsMaxCount", Const.GRID_COUNT)
-        }.onFailure {
-            XposedBridge.log("[${Const.TAG}] preview container size setters failed: $it")
-        }
-
         if (XposedHelpers.getAdditionalInstanceField(container, Const.KEY_HELPER) == null) {
             XposedHelpers.setAdditionalInstanceField(
                 container, Const.KEY_HELPER, FolderPreviewContainer6X3(container)
             )
+        }
+
+        runCatching {
+            XposedHelpers.callMethod(container, "setMLargeIconNum", Const.LARGE_COUNT)
+            XposedHelpers.callMethod(container, "setMItemsMaxCount", Const.MAX_COUNT)
+        }.onFailure {
+            XposedBridge.log("[${Const.TAG}] preview container size setters failed: $it")
         }
     }
 
@@ -219,7 +258,6 @@ object LayoutHook {
             }
         )
     }
-
     /** 沿 parent 链向上找宿主 FolderIcon，判断它是否是 18 宫格 */
     private fun belongsTo18Grid(view: View): Boolean {
         var p = view.parent
@@ -232,6 +270,60 @@ object LayoutHook {
         }
         return false
     }
+
+    // ------------------------------------------------------------------
+    // 3.5 打开动画的图标类型路由（点击文件夹闪退的根因）
+    // ------------------------------------------------------------------
+
+    /**
+     * FolderCling 里预置了三个 FolderIcon 占位 View（1x1 / 2x2_4 / 2x2_9），
+     * 打开文件夹时 initAnimFolderIcon -> loadAnimFolderIcon 用
+     * determineLayoutResource(info) 三选一，findViewById 出来当动画载体：
+     *
+     *   itemType == 0x15 -> R.id.folder_icon_2x2_4
+     *   itemType == 0x16 -> R.id.folder_icon_2x2_9
+     *   其他             -> R.id.folder_icon_1x1
+     *
+     * 0x20018 落到最后一档，动画载体就是 FolderIcon1x1；紧接着
+     * setupAnimFolderIcon -> FolderIcon.loadIconPreViews(info) 里按
+     * 桌面端 buddyIconView（我们的 FolderIcon2x2_9）走 instanceof FolderIcon2x2
+     * 分支，把自身 check-cast 成 FolderIcon2x2，于是：
+     *
+     *   ClassCastException: FolderIcon1x1 cannot be cast to FolderIcon2x2
+     *
+     * 这里让 0x20018 也返回 folder_icon_2x2_9 的 view id，动画载体与桌面端
+     * 图标类型一致，强转成立。返回 0（资源名找不到）时不改，退回宿主行为。
+     */
+    private fun hookClingLayout(cl: ClassLoader) {
+        val cling = XposedHelpers.findClass(Const.CLS_FOLDER_CLING, cl)
+        val folderInfo = XposedHelpers.findClass(Const.CLS_FOLDER_INFO, cl)
+
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                cling, "determineLayoutResource", folderInfo,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val info = param.args[0] ?: return
+                        if (DataHook.itemTypeOf(info) != Const.FOLDER_18_GRID) return
+
+                        val view = param.thisObject as? View ?: return
+                        val id = HostRes.viewId(view.context, Const.RES_ID_FOLDER_ICON_2X2_9)
+                        if (id == 0) {
+                            XposedBridge.log(
+                                "[${Const.TAG}] id ${Const.RES_ID_FOLDER_ICON_2X2_9} missing," +
+                                    " folder open would crash"
+                            )
+                            return
+                        }
+                        param.result = id
+                    }
+                }
+            )
+        }.onFailure {
+            XposedBridge.log("[${Const.TAG}] determineLayoutResource hook failed: $it")
+        }
+    }
+
 
     // ------------------------------------------------------------------
     // 4. 预览容器布局接管

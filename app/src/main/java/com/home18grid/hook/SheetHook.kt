@@ -372,7 +372,7 @@ object SheetHook {
         val count = runCatching { XposedHelpers.callMethod(info, "count") as Int }.getOrDefault(0)
         val iconViewClass = XposedHelpers.findClass(Const.CLS_PREVIEW_ICON_VIEW, cl)
 
-        repeat(minOf(Const.GRID_COUNT, count)) {
+        repeat(minOf(Const.MAX_COUNT, count)) {
             val iconView = XposedHelpers.newInstance(iconViewClass, sheet.context)
             XposedHelpers.callMethod(preview, "addPreView", iconView)
         }

@@ -53,11 +53,15 @@ object DataHook {
             }
         })
 
-        /** 预览图标上限：宿主 0x15 给 7、其余给 12，18 宫格需要 18 */
+        /**
+         * 预览图标上限：宿主 0x15 给 7、其余给 12。
+         * 18 宫格需要 21 = 前 17 个大图标 + 第 18 格里的 4 个小图标，
+         * 少于这个数第 18 格的「还有更多」四宫格就没有数据可画。
+         */
         XposedHelpers.findAndHookMethod(folderInfo, "getPreviewMaxCount", object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 if (itemTypeOf(param.thisObject) == Const.FOLDER_18_GRID) {
-                    param.result = Const.GRID_COUNT
+                    param.result = Const.MAX_COUNT
                 }
             }
         })

@@ -27,7 +27,26 @@ object Const {
     /** 6 列 x 3 行 = 18 个等大图标 */
     const val GRID_COLUMNS = 6
     const val GRID_ROWS = 3
+
+    /** 网格格子总数 = 18 */
     const val GRID_COUNT = GRID_COLUMNS * GRID_ROWS
+
+    /**
+     * 前 17 格放大图标（可直接点击启动），第 18 格按宿主九宫格的做法
+     * 塞 4 个 2x2 小图标，用来展示"还有更多"，点它打开文件夹。
+     *
+     * 对应宿主 2x2_9 的 mLargeIconNum=8 / mItemsMaxCount=12
+     * （前 8 格大图标 + 第 9 格内 4 个小图标）。
+     */
+    const val LARGE_COUNT = GRID_COUNT - 1
+    const val SMALL_COUNT = 4
+    const val MAX_COUNT = LARGE_COUNT + SMALL_COUNT
+
+    /**
+     * 图标边长占单元格的比例，剩下的留作间距。
+     * 宿主 2x2_9 在 3 列下 edge 占 6.25%、inner 占 4.4%，折算到单格约 0.85。
+     */
+    const val ICON_RATIO = 0.86f
 
     /**
      * 桌面格位占用。18 宫格必须横向占满整行（宽 = 桌面列数），
@@ -56,6 +75,9 @@ object Const {
         "com.miui.home.launcher.convertsize.FolderIconConvertSizeController"
     const val CLS_LOADER_TASK = "com.miui.home.model.core.LoaderTask"
     const val CLS_DEVICE_CONFIGS = "com.miui.home.common.device.DeviceConfigs"
+
+    /** 打开文件夹时的展开动画载体，会按 itemType 挑一个 FolderIcon 占位 View */
+    const val CLS_FOLDER_CLING = "com.miui.home.folder.FolderCling"
 
     // miuix 控件（miuix.visual.check 包，均为 public）
     const val CLS_VISUAL_CHECK_BOX = "miuix.visual.check.VisualCheckBox"
@@ -113,6 +135,13 @@ object Const {
 
     /** layout，FolderIcon2x2_9 的布局（0x7f0d006a -> res/q8h.xml） */
     const val RES_LAYOUT_FOLDER_ICON_2X2_9 = "folder_icon_2x2_9"
+
+    /**
+     * FolderCling 里三个 FolderIcon 占位 View 的 id。
+     * determineLayoutResource() 按 itemType 在 0x15/0x16/其他 之间三选一，
+     * 0x20018 会落到 folder_icon_1x1 分支，导致后续 check-cast FolderIcon2x2 崩溃。
+     */
+    const val RES_ID_FOLDER_ICON_2X2_9 = "folder_icon_2x2_9"
 
     /** drawable，BorderLayout 的 app:checkedBackGround（0x7f080255） */
     const val RES_DRAWABLE_CHECKBOX_BG = "folder_picker_visualcheckbox_bg_shape_select"
