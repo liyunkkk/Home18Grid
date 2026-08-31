@@ -36,6 +36,7 @@ object LayoutHook {
         hookIconContainerSpan(cl)
         hookPreviewContainer(cl)
         hookClingLayout(cl)
+        hookAnimIconLoc(cl)
     }
 
     // ------------------------------------------------------------------
@@ -324,6 +325,74 @@ object LayoutHook {
         }
     }
 
+
+    // ------------------------------------------------------------------
+    // 3.6 展开动画的预览图标映射（第一个图标漂浮在文件夹上方）
+    // ------------------------------------------------------------------
+
+    /**
+     * FolderAnimController.setupView 里：
+     *
+     *   p2 = folderIconAnimView.getIconColumCount()          // 我们设成了 6
+     *   if (SmaliDedicatedSettingManager4.mFolderColumnNumber != 3) p2 = mFolderColumnNumber
+     *   initIconLoc(mFolderColumnNumber, p2, itemType, folderIcon)
+     *
+     * initIconLoc 只有两条能填 mFolderIconLocMap 的路径：
+     *   p2 == p1（列数一致）  -> 填 i->i 的恒等映射
+     *   itemType == 0x15     -> 走 2x2_4 的专用映射
+     *   其余                 -> 直接 return 0，映射表**保持为空**
+     *
+     * 宿主 2x2_9 的 mIconColumCount 是 3，而 mFolderColumnNumber 默认也是 3，
+     * 或被用户改成 N 时 p2 会被覆盖成同一个 N，所以两者恒等、永远走第一条。
+     * 我们把 mIconColumCount 设成 6，于是 6 != 3，itemType 又不是 0x15，
+     * 映射表空了。空表的后果在 preFolderIconAnim 里：
+     *
+     *   for (key in map.keySet()) { ...把预览图标飞到网格位置... }   // 空表，什么都不做
+     *   for (i in mLastItemIndex + 1 until previewArray.size)        // mLastItemIndex = 0
+     *       addSmallFolderPreViewAnim(...)                           // 从 1 开始
+     *
+     * 下标 0 既没进第一个循环、也没进第二个循环，从头到尾没人管它的
+     * 位置和透明度，于是它就以桌面上的原样停在展开后的文件夹上方 —— 就是
+     * 那个「一直漂浮着的第一个图标」。
+     *
+     * 这里为 0x20018 显式建表，并且对齐宿主 2x2_9 的分工：它把 0..8 共 9 个
+     * 下标填进表（含第 9 格里的第一个小图标），返回 8 作为 mLastItemIndex，
+     * 剩下的 9..11 交给 addSmallFolderPreViewAnim。照此按 18 格换算，
+     * 填 0..17 共 18 个下标、返回 17，余下 18..20 走小图标收尾动画。
+     *
+     * 应用数少于 18 个时不用额外处理：宿主自己会判
+     * key >= min(previewArray.size, desktopImageViews.size) 就跳过，
+     * 以及网格子 View 不够时把该预览 alpha 置 0。
+     */
+    private fun hookAnimIconLoc(cl: ClassLoader) {
+        val controller = XposedHelpers.findClass(Const.CLS_FOLDER_ANIM_CONTROLLER, cl)
+
+        val initIconLoc = controller.declaredMethods.firstOrNull {
+            it.name == "initIconLoc" && it.parameterTypes.size == 4
+        } ?: run {
+            XposedBridge.log("[${Const.TAG}] FolderAnimController.initIconLoc not found")
+            return
+        }
+
+        XposedBridge.hookMethod(initIconLoc, object : XC_MethodHook() {
+            @Suppress("UNCHECKED_CAST")
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                if (param.args[2] != Const.FOLDER_18_GRID) return
+
+                val map = runCatching {
+                    XposedHelpers.getObjectField(param.thisObject, Const.F_ICON_LOC_MAP)
+                        as? MutableMap<Int, Int>
+                }.getOrNull() ?: run {
+                    XposedBridge.log("[${Const.TAG}] ${Const.F_ICON_LOC_MAP} missing")
+                    return
+                }
+
+                map.clear()
+                for (i in 0 until Const.GRID_COUNT) map[i] = i
+                param.result = Const.GRID_COUNT - 1
+            }
+        })
+    }
 
     // ------------------------------------------------------------------
     // 4. 预览容器布局接管

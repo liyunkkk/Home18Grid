@@ -79,6 +79,16 @@ object Const {
     /** 打开文件夹时的展开动画载体，会按 itemType 挑一个 FolderIcon 占位 View */
     const val CLS_FOLDER_CLING = "com.miui.home.folder.FolderCling"
 
+    /** 展开/收起动画控制器，负责把桌面预览图标飞到展开后的网格位置 */
+    const val CLS_FOLDER_ANIM_CONTROLLER = "com.miui.home.folder.FolderAnimController"
+
+    /**
+     * FolderAnimController 的 Map<Integer,Integer>：
+     * key = 预览图标下标，value = 展开后 FolderGridView 里的子 View 下标。
+     * 空表示「这个图标不参与动画」，也就不会被隐藏。
+     */
+    const val F_ICON_LOC_MAP = "mFolderIconLocMap"
+
     // miuix 控件（miuix.visual.check 包，均为 public）
     const val CLS_VISUAL_CHECK_BOX = "miuix.visual.check.VisualCheckBox"
     const val CLS_VISUAL_CHECK_GROUP = "miuix.visual.check.VisualCheckGroup"
