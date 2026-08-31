@@ -19,10 +19,12 @@ import de.robv.android.xposed.XposedHelpers
  *
  * 2. FolderIcon2x2_9 的构造里写死 mLargeIconNum=8 / mItemsMaxCount=12 /
  *    mIconColumCount=3（三个 protected setter 在父类 FolderIcon2x2 上）。
- *    在 FolderIcon2x2.setup 之后按实际 itemType 改成 18 / 18 / 6。
- *    mLargeIconNum = 18 是"全部 18 个图标都能直接点击启动"的开关：
+ *    在 setup / createOrRemoveView2 时按实际 itemType 改成 17 / 21。
+ *    mLargeIconNum = 17 是"前 17 个图标都能直接点击启动"的开关：
  *    onMeasureChild2x2 里 index < mLargeIconNum 的子 View 才会被
- *    setIconViewType(BIGICONVIEW)。
+ *    setIconViewType(BIGICONVIEW)，其余走第 18 格里的小图标。
+ *    mIconColumCount 保持宿主原值 3（它只被展开动画读，改了会带崩九宫格，
+ *    详见 hookAnimIconLoc）。
  *
  * 3. FolderIconPreviewContainer2X2_9 的三个布局方法
  *    (preMeasure2x2 / preSetup2x2 / getSmallItemsRectF)
@@ -150,10 +152,12 @@ object LayoutHook {
                         val info = runCatching {
                             XposedHelpers.getObjectField(icon, "mInfo")
                         }.getOrNull() ?: return
+
+                        // 无条件跑一次：18 宫格写入数量+helper，其他类型摘掉 helper
+                        applyIfMatched(icon)
                         if (DataHook.itemTypeOf(info) != Const.FOLDER_18_GRID) return
 
                         param.result = null
-                        applyIfMatched(icon)
                         runCatching { XposedHelpers.callMethod(icon, "createOrRemoveView") }
                             .onFailure {
                                 XposedBridge.log("[${Const.TAG}] createOrRemoveView failed: $it")
@@ -170,23 +174,33 @@ object LayoutHook {
         val info = runCatching {
             XposedHelpers.getObjectField(icon, "mInfo")
         }.getOrNull() ?: return
-        if (DataHook.itemTypeOf(info) != Const.FOLDER_18_GRID) return
-
-        // 三个 setter 都是 protected final，用 callMethod 反射调用
-        runCatching {
-            XposedHelpers.callMethod(icon, "setMLargeIconNum", Const.LARGE_COUNT)
-            XposedHelpers.callMethod(icon, "setMLargeIconNum2", Const.LARGE_COUNT)
-            XposedHelpers.callMethod(icon, "setMItemsMaxCount", Const.MAX_COUNT)
-            XposedHelpers.callMethod(icon, "setMIconColumCount", Const.GRID_COLUMNS)
-        }.onFailure {
-            XposedBridge.log("[${Const.TAG}] FolderIcon2x2 size setters failed: $it")
-        }
 
         // mPreviewContainer 是 public 字段，setup 里由 findViewById 赋值
         val container = runCatching {
             XposedHelpers.getObjectField(icon, "mPreviewContainer") as? View
-        }.getOrNull() ?: return
-        applyContainerSize(container)
+        }.getOrNull()
+
+        if (DataHook.itemTypeOf(info) != Const.FOLDER_18_GRID) {
+            // 见 detachHelper 注释：这一步是 FolderCling 共享动画图标的必要善后
+            container?.let { detachHelper(it) }
+            return
+        }
+
+        /**
+         * 数量三件套。注意**不动** mIconColumCount：
+         * 它唯一的读者是 FolderAnimController.setupView，把它改成 6 会让
+         * 宿主九宫格的动画映射表也失效（详见 hookAnimIconLoc）。18 宫格
+         * 自己的映射表由 hookAnimIconLoc 直接构造，不依赖这个字段。
+         */
+        runCatching {
+            XposedHelpers.callMethod(icon, "setMLargeIconNum", Const.LARGE_COUNT)
+            XposedHelpers.callMethod(icon, "setMLargeIconNum2", Const.LARGE_COUNT)
+            XposedHelpers.callMethod(icon, "setMItemsMaxCount", Const.MAX_COUNT)
+        }.onFailure {
+            XposedBridge.log("[${Const.TAG}] FolderIcon2x2 size setters failed: $it")
+        }
+
+        container?.let { applyContainerSize(it) }
     }
 
     /**
@@ -212,6 +226,22 @@ object LayoutHook {
     private fun helperOf(view: View): FolderPreviewContainer6X3? =
         XposedHelpers.getAdditionalInstanceField(view, Const.KEY_HELPER)
             as? FolderPreviewContainer6X3
+
+    /**
+     * 摘掉 6x3 算法辅助类，让容器回到宿主原生的 preMeasure2x2 / preSetup2x2。
+     *
+     * 为什么必须有这一步：FolderCling 的布局里只预置了**一个**
+     * `folder_icon_2x2_9` 占位 View，宿主九宫格和我们的 18 宫格
+     * 打开时共用同一个实例（determineLayoutResource 现在两者都指向它）。
+     * 一旦某次 18 宫格打开时给它的预览容器挂上了 helper，之后打开宿主
+     * 九宫格时这个 helper 还在，展开动画里的图标就会按 6x3 排布，
+     * 与桌面上真实的 3x3 图标位置对不上，肉眼看就是「回弹时顿一下」。
+     */
+    private fun detachHelper(container: View) {
+        if (XposedHelpers.getAdditionalInstanceField(container, Const.KEY_HELPER) != null) {
+            XposedHelpers.setAdditionalInstanceField(container, Const.KEY_HELPER, null)
+        }
+    }
 
     // ------------------------------------------------------------------
     // 3. 预览区物理尺寸（方块 → 整行长条）
@@ -333,32 +363,34 @@ object LayoutHook {
     /**
      * FolderAnimController.setupView 里：
      *
-     *   p2 = folderIconAnimView.getIconColumCount()          // 我们设成了 6
+     *   p2 = folderIconAnimView.getIconColumCount()
      *   if (SmaliDedicatedSettingManager4.mFolderColumnNumber != 3) p2 = mFolderColumnNumber
      *   initIconLoc(mFolderColumnNumber, p2, itemType, folderIcon)
      *
      * initIconLoc 只有两条能填 mFolderIconLocMap 的路径：
-     *   p2 == p1（列数一致）  -> 填 i->i 的恒等映射
+     *   p2 == p1（列数一致）  -> 填 i->i 的恒等映射，返回 min(p2*p2-1, 末位)
      *   itemType == 0x15     -> 走 2x2_4 的专用映射
      *   其余                 -> 直接 return 0，映射表**保持为空**
      *
-     * 宿主 2x2_9 的 mIconColumCount 是 3，而 mFolderColumnNumber 默认也是 3，
-     * 或被用户改成 N 时 p2 会被覆盖成同一个 N，所以两者恒等、永远走第一条。
-     * 我们把 mIconColumCount 设成 6，于是 6 != 3，itemType 又不是 0x15，
-     * 映射表空了。空表的后果在 preFolderIconAnim 里：
+     * 空表的后果在 preFolderIconAnim 里：
      *
      *   for (key in map.keySet()) { ...把预览图标飞到网格位置... }   // 空表，什么都不做
      *   for (i in mLastItemIndex + 1 until previewArray.size)        // mLastItemIndex = 0
      *       addSmallFolderPreViewAnim(...)                           // 从 1 开始
      *
-     * 下标 0 既没进第一个循环、也没进第二个循环，从头到尾没人管它的
-     * 位置和透明度，于是它就以桌面上的原样停在展开后的文件夹上方 —— 就是
-     * 那个「一直漂浮着的第一个图标」。
+     * 下标 0 两个循环都没覆盖，位置和 alpha 都没人动，于是它以桌面上的
+     * 原样停在展开后的文件夹上方 —— 就是那个「漂浮的第一个图标」。
+     * 其余下标虽然有动画，但走的是「收尾小图标」那条，不是飞向网格对应
+     * 位置，所以观感上还会顿一下。
      *
-     * 这里为 0x20018 显式建表，并且对齐宿主 2x2_9 的分工：它把 0..8 共 9 个
-     * 下标填进表（含第 9 格里的第一个小图标），返回 8 作为 mLastItemIndex，
-     * 剩下的 9..11 交给 addSmallFolderPreViewAnim。照此按 18 格换算，
-     * 填 0..17 共 18 个下标、返回 17，余下 18..20 走小图标收尾动画。
+     * 注意 `getIconColumCount()` 读的是 mIconColumCount，而它**不能**改成 6：
+     * 宿主九宫格与 18 宫格共用 FolderIcon2x2 这一套 setter，一旦被改成 6，
+     * 九宫格自己也会 6 != 3 落进空表分支，于是九宫格也出现漂浮图标。
+     * 所以这里不动那个字段，改为直接为 0x20018 构造映射表。
+     *
+     * 建表规则对齐宿主九宫格的分工：它填 0..8 共 9 个下标、返回 8，
+     * 余下 9..11 交给 addSmallFolderPreViewAnim 收尾。按 18 格换算即
+     * 填 0..17、返回 17，余下 18..20 走收尾动画。
      *
      * 应用数少于 18 个时不用额外处理：宿主自己会判
      * key >= min(previewArray.size, desktopImageViews.size) 就跳过，
