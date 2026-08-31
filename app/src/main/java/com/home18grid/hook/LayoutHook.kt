@@ -33,6 +33,7 @@ object LayoutHook {
     fun install(cl: ClassLoader) {
         hookFromXml(cl)
         hookFolderIconSizes(cl)
+        hookIconContainerSpan(cl)
         hookPreviewContainer(cl)
     }
 
@@ -173,7 +174,67 @@ object LayoutHook {
             as? FolderPreviewContainer6X3
 
     // ------------------------------------------------------------------
-    // 3. 预览容器布局接管
+    // 3. 预览区物理尺寸（方块 → 整行长条）
+    // ------------------------------------------------------------------
+
+    /**
+     * LauncherFolder2x2IconContainer 是 folder_icon_2x2_9 里包住预览容器的那层
+     * FrameLayout，构造函数里把 cellX / cellY 写死成 2 / 2：
+     *
+     *   onMeasure(w, h):
+     *     spec = DeviceConfigs.getMiuiWidgetSizeSpec(cellX, cellY, true)
+     *     width  = spec >> 32   // 由 cellX 算出
+     *     height = (int) spec   // 由 cellY 算出
+     *
+     * 也就是说不管上层 spanX/spanY 给了多少，这一层永远按 2x2 量出一个正方形，
+     * 6 列图标塞进 2 格宽 → 每个图标只有 1/3 格宽，就是「方块里一堆小点」。
+     *
+     * 这里在 onMeasure 之前把 cellX 改成桌面列数、cellY 改成 2，
+     * 预览区才会真正撑成「整行宽 × 2 格高」，18 个图标接近桌面原生图标大小。
+     *
+     * 只改属于 0x20018 的那些实例：沿 parent 链找到 FolderIcon，读 mInfo.itemType 判定。
+     * 宿主原生 2x2_4 / 2x2_9 的容器不受影响。
+     */
+    private fun hookIconContainerSpan(cl: ClassLoader) {
+        val containerClass = XposedHelpers.findClass(Const.CLS_ICON_CONTAINER_2X2, cl)
+        val deviceConfigs = XposedHelpers.findClass(Const.CLS_DEVICE_CONFIGS, cl)
+
+        XposedHelpers.findAndHookMethod(
+            containerClass, "onMeasure",
+            Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+            object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val container = param.thisObject as? View ?: return
+                    if (!belongsTo18Grid(container)) return
+
+                    runCatching {
+                        XposedHelpers.setIntField(
+                            container, Const.F_CELL_X, DataHook.cellCountX(deviceConfigs)
+                        )
+                        XposedHelpers.setIntField(container, Const.F_CELL_Y, Const.SPAN_Y)
+                    }.onFailure {
+                        XposedBridge.log("[${Const.TAG}] icon container span failed: $it")
+                    }
+                }
+            }
+        )
+    }
+
+    /** 沿 parent 链向上找宿主 FolderIcon，判断它是否是 18 宫格 */
+    private fun belongsTo18Grid(view: View): Boolean {
+        var p = view.parent
+        var depth = 0
+        while (p is View && depth < 4) {
+            val info = runCatching { XposedHelpers.getObjectField(p, "mInfo") }.getOrNull()
+            if (info != null) return DataHook.itemTypeOf(info) == Const.FOLDER_18_GRID
+            p = p.parent
+            depth++
+        }
+        return false
+    }
+
+    // ------------------------------------------------------------------
+    // 4. 预览容器布局接管
     // ------------------------------------------------------------------
     /**
      * 只有挂了 helper 的实例才被接管（helper 由 applyContainerSize 挂载），

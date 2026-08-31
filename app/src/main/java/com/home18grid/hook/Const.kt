@@ -29,6 +29,14 @@ object Const {
     const val GRID_ROWS = 3
     const val GRID_COUNT = GRID_COLUMNS * GRID_ROWS
 
+    /**
+     * 桌面格位占用。18 宫格必须横向占满整行（宽 = 桌面列数），
+     * 否则 6 列图标挤在 2 格宽度里会变成一堆小点。
+     * SPAN_X 运行期取 DeviceConfigs.getCellCountX()，这里只是取不到时的兜底。
+     */
+    const val SPAN_X_FALLBACK = 4
+    const val SPAN_Y = 2
+
     // ---------------- 宿主类名 ----------------
 
     const val CLS_FOLDER_SHEET = "com.miui.home.folder.FolderSheet"
@@ -40,6 +48,7 @@ object Const {
     /** abstract ViewGroup，2x2_4 / 2x2_9 的公共父类，数量与 childList 都在它上面 */
     const val CLS_PREVIEW_CONTAINER_BASE = "com.miui.home.folder.BaseFolderIconPreviewContainer2X2"
     const val CLS_PREVIEW_CONTAINER_2X2_9 = "com.miui.home.folder.FolderIconPreviewContainer2X2_9"
+    const val CLS_ICON_CONTAINER_2X2 = "com.miui.home.folder.LauncherFolder2x2IconContainer"
     const val CLS_PREVIEW_INFO = "com.miui.home.folder.FolderIconPreviewInfo"
     const val CLS_PREVIEW_ICON_VIEW = "com.miui.home.folder.FolderPreviewIconView"
 
@@ -90,6 +99,14 @@ object Const {
     const val F_SMALL_ITEM_W = "mSmallItemWith"
     const val F_SMALL_ITEM_H = "mSmallItemHeight"
     const val F_SMALL_INNER = "mSmall2x2ItemMergeInner"
+
+    /**
+     * LauncherFolder2x2IconContainer 的 cellX / cellY（private final，构造里写死 2/2）。
+     * onMeasure 用它俩过 DeviceConfigs.getMiuiWidgetSizeSpec(cellX, cellY, true)
+     * 换算出预览区的真实像素宽高，是「文件夹图标在桌面上是方块还是长条」的唯一决定点。
+     */
+    const val F_CELL_X = "cellX"
+    const val F_CELL_Y = "cellY"
 
     // ---------------- 宿主资源名 ----------------
     // 全部经 aapt dump values 核实，括号内为 ENH 上的实际 ID（仅作记录，运行时按名查）

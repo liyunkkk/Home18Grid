@@ -79,24 +79,48 @@ object DataHook {
     /**
      * convertFolderSize(info, type) 先调 getFolderSpanXFromType / YFromType
      * 换算目标占位，再交给 BaseLauncher.bindFolderResize 落库。
-     * 宿主对未知 type 返回 1，会把 18 宫格摆成 1x1，必须补 0x20018 -> 2。
+     *
+     * 宿主对 2/21/22 一律返回 2（2x2 正方形），未知 type 返回 1。
+     *
+     * 18 宫格不能用 2x2：6 列图标塞进 2 格宽度，单个图标只有 1/3 格宽，
+     * 视觉上就是一个塞了一排小点的方块。正确做法是横向占满整行：
+     *   spanX = 桌面列数（4 列网格下为 4）→ 每列图标 4/6 ≈ 0.67 格宽
+     *   spanY = 2                        → 每行图标 2/3 ≈ 0.67 格高，正方形
+     * 这样 18 个图标的尺寸接近桌面原生图标，与目标效果一致。
+     *
+     * spanX 取 DeviceConfigs.getCellCountX() 动态值而非硬编码 4，
+     * 用户改桌面布局（4x6 / 5x6 等）后仍然占满整行。
      */
     private fun hookConvertSize(cl: ClassLoader) {
         val controller = XposedHelpers.findClass(Const.CLS_CONVERT_SIZE_CONTROLLER, cl)
+        val deviceConfigs = XposedHelpers.findClass(Const.CLS_DEVICE_CONFIGS, cl)
 
-        for (name in arrayOf("getFolderSpanXFromType", "getFolderSpanYFromType")) {
-            XposedHelpers.findAndHookMethod(
-                controller, name, Int::class.javaPrimitiveType,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (param.args[0] == Const.FOLDER_18_GRID) {
-                            param.result = 2
-                        }
-                    }
+        XposedHelpers.findAndHookMethod(
+            controller, "getFolderSpanXFromType", Int::class.javaPrimitiveType,
+            object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (param.args[0] != Const.FOLDER_18_GRID) return
+                    param.result = cellCountX(deviceConfigs)
                 }
-            )
-        }
+            }
+        )
+
+        XposedHelpers.findAndHookMethod(
+            controller, "getFolderSpanYFromType", Int::class.javaPrimitiveType,
+            object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    if (param.args[0] != Const.FOLDER_18_GRID) return
+                    param.result = Const.SPAN_Y
+                }
+            }
+        )
     }
+
+    /** 桌面列数，取不到时退回 4（HyperOS 默认 4x6） */
+    fun cellCountX(deviceConfigs: Class<*>): Int = runCatching {
+        (XposedHelpers.callStaticMethod(deviceConfigs, "getCellCountX") as Int)
+            .coerceAtLeast(Const.GRID_ROWS)
+    }.getOrDefault(Const.SPAN_X_FALLBACK)
 
     // ------------------------------------------------------------------
     // 3. DB 加载
