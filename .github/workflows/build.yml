@@ -11,7 +11,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -24,10 +23,11 @@ jobs:
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.9'
 
       - name: Build with Gradle
-        run: |
-          gradle assembleRelease --stacktrace
+        run: gradle assembleRelease --stacktrace --no-daemon
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -37,15 +37,14 @@ jobs:
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/heads/main')
+        if: github.ref == 'refs/heads/main'
         with:
           tag_name: v1.0.0-${{ github.run_number }}
           name: Home18Grid Release v1.0.0-${{ github.run_number }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: app/build/outputs/apk/release/*.apk
           body: |
             HyperOS 18 宫格大文件夹 LSPosed 模块构建产物
-            - 适配 ENH 桌面 (`com.miui.home.folder.*`)
-            - 6x3 微型等分网格
-            - 18 图标全部直接点击启动
-          files: app/build/outputs/apk/release/*.apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            - 适配 ENH 桌面 (com.miui.home.folder.*)
+            - 6x3 等分微型网格预览
+            - 18 个图标全部支持直接点击启动

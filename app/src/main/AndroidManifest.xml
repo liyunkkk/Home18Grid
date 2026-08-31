@@ -14,7 +14,6 @@
             android:value="82" />
         <meta-data
             android:name="xposedscope"
-            android:resource="@null"
-            android:value="com.miui.home" />
+            android:resource="@array/xposedscope" />
     </application>
 </manifest>

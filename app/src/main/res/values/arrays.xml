@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- LSPosed 读取该 string-array 作为模块作用域，自动只勾选桌面 -->
+    <string-array name="xposedscope">
+        <item>com.miui.home</item>
+    </string-array>
+</resources>
