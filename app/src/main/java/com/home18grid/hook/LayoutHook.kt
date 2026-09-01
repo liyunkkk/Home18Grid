@@ -1,5 +1,7 @@
 package com.home18grid.hook
 
+import android.content.Context
+import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import de.robv.android.xposed.XC_MethodHook
@@ -62,8 +64,6 @@ object LayoutHook {
     // ==================================================================
     private fun hookClingInflate(cl: ClassLoader) {
         val cling = XposedHelpers.findClass(Const.CLS_FOLDER_CLING, cl)
-        val folderIcon = XposedHelpers.findClass(Const.CLS_FOLDER_ICON, cl)
-        val inflater = inflaterOf(folderIcon) ?: return
 
         XposedHelpers.findAndHookMethod(
             cling, "onFinishInflate",
@@ -78,12 +78,19 @@ object LayoutHook {
                         return
                     }
 
+                    val inflater = group.context
+                        .getSystemService(Context.LAYOUT_INFLATER_SERVICE) as LayoutInflater
+
                     val ids = HashMap<Int, Int>()
                     for (spec in Const.SPECS.values) {
                         runCatching {
-                            val icon = inflater.invoke(
-                                null, layoutId, null, group, null, null
-                            ) as View
+                            // 不能用 FolderIcon.fromXml(int,...)：它内部立即读取 FolderInfo
+                            // 字段绑数据，载体 inflate 时还没有 info，必然 NPE。
+                            // 宿主自己的三个预置载体也是布局 XML 里由 LayoutInflater
+                            // 创建的（走 (Context, AttributeSet) 构造，构造内完成
+                            // findViewById 绑定），这里走同一条路径。
+                            // root=group 只用于生成 LayoutParams，不 attach。
+                            val icon = inflater.inflate(layoutId, group, false) as View
                             val viewId = View.generateViewId()
                             icon.id = viewId
                             icon.visibility = View.GONE
