@@ -452,6 +452,33 @@ object LayoutHook {
     private fun hookAnimIconLoc(cl: ClassLoader) {
         val controller = XposedHelpers.findClass(Const.CLS_FOLDER_ANIM_CONTROLLER, cl)
 
+        // 1. 修复 DISPLAY_COUNT_MAX 默认写死 9 的问题：
+        // setupView 里 DISPLAY_COUNT_MAX = getMaxRow() * 3 = 9，导致 preFolderGridAnim
+        // 只对前 9 个图标建飞行动画，18 宫格后 9 个图标被直接置透明、收起时顿挫闪烁。
+        val setupView = controller.declaredMethods.firstOrNull {
+            it.name == "setupView" && it.parameterTypes.size == 2
+        }
+        if (setupView != null) {
+            XposedBridge.hookMethod(setupView, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val info = runCatching {
+                        XposedHelpers.getObjectField(param.thisObject, "mAnimaFolderInfo")
+                    }.getOrNull() ?: return
+                    val spec = Const.specOf(DataHook.itemTypeOf(info)) ?: return
+                    runCatching {
+                        XposedHelpers.setIntField(
+                            param.thisObject,
+                            Const.F_DISPLAY_COUNT_MAX,
+                            maxOf(spec.maxCount, spec.gridCount)
+                        )
+                    }.onFailure {
+                        XposedBridge.log("[${Const.TAG}] set DISPLAY_COUNT_MAX failed: $it")
+                    }
+                }
+            })
+        }
+
+        // 2. 自定义类型恒等映射表
         val initIconLoc = controller.declaredMethods.firstOrNull {
             it.name == "initIconLoc" && it.parameterTypes.size == 4
         } ?: run {

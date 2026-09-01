@@ -149,6 +149,12 @@ object Const {
      */
     const val F_ICON_LOC_MAP = "mFolderIconLocMap"
 
+    /**
+     * FolderAnimController 参与飞行动画的最大子 View 数量。
+     * 宿主默认 getMaxRow() * 3 = 9，导致 18 宫格收起时后 9 个图标不参与动画、顿挫闪烁。
+     */
+    const val F_DISPLAY_COUNT_MAX = "DISPLAY_COUNT_MAX"
+
     // miuix 控件（miuix.visual.check 包，均为 public）
     const val CLS_VISUAL_CHECK_BOX = "miuix.visual.check.VisualCheckBox"
     const val CLS_VISUAL_CHECK_GROUP = "miuix.visual.check.VisualCheckGroup"
