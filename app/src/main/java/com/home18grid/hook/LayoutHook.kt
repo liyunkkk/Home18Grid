@@ -49,6 +49,9 @@ object LayoutHook {
     /** cling 上记 (itemType -> 专属动画载体 view id) 的附加字段 */
     private const val KEY_CLING_IDS = "home18grid_cling_ids"
 
+    /** FolderAnimController 上记 setupView 阶段算出的目标 DISPLAY_COUNT_MAX */
+    private const val K_PENDING_DISPLAY_MAX = "home18grid_pending_display_max"
+
     fun install(cl: ClassLoader) {
         hookClingInflate(cl)
         hookClingLayout(cl)
@@ -452,25 +455,52 @@ object LayoutHook {
     private fun hookAnimIconLoc(cl: ClassLoader) {
         val controller = XposedHelpers.findClass(Const.CLS_FOLDER_ANIM_CONTROLLER, cl)
 
-        // 1. 修复 DISPLAY_COUNT_MAX 默认写死 9 的问题：
-        // setupView 里 DISPLAY_COUNT_MAX = getMaxRow() * 3 = 9，导致 preFolderGridAnim
-        // 只对前 9 个图标建飞行动画，18 宫格后 9 个图标被直接置透明、收起时顿挫闪烁。
+        // 1. 修复 DISPLAY_COUNT_MAX 默认写死 9 的问题（v1.1.3 修正）：
+        // setupView 执行序列：clearAnimList → ... → mDesktopImageViews = 桌面图标.getPreviewArray()
+        // → DISPLAY_COUNT_MAX = getMaxRow() * 3 → initIconLoc。
+        // 必须在 before 里做两件事：
+        //   a) 对桌面图标的预览容器补齐槽位（getItemsMaxCount = 21）并调
+        //      createOrRemoveView() 让 mPvChildList 长度 = min(count, 21)，
+        //      否则 mDesktopImageViews 拷贝出的数组长度不足，
+        //      preFolderGridAnim 中后段图标走 setExposedGridViewItemFolme（直隐）分支。
+        //   b) 修 DISPLAY_COUNT_MAX 的来源：宿主 getMaxRow() 实为
+        //      ceil(adapterCount/3) 经 mFolderRowNumber 全局设置钳制，3 列布局下
+        //      18 个图标 -> row = 6 -> maxRow=6 -> DISPLAY_COUNT_MAX = 18；正确值为
+        //      maxOf(spec.maxCount, gridCount) = 21（含末格 4 小图标）。
+        //      initIconLoc 恒等映射填 0..17、返回 17，余下 18..20 由
+        //      addSmallFolderPreViewAnim 收尾，DISPLAY_COUNT_MAX 只需 >= 需要值。
         val setupView = controller.declaredMethods.firstOrNull {
             it.name == "setupView" && it.parameterTypes.size == 2
         }
         if (setupView != null) {
             XposedBridge.hookMethod(setupView, object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val info = runCatching {
-                        XposedHelpers.getObjectField(param.thisObject, "mAnimaFolderInfo")
-                    }.getOrNull() ?: return
-                    val spec = Const.specOf(DataHook.itemTypeOf(info)) ?: return
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val desktopIcon = param.args[1] as? View ?: return
+                    val spec = specOfIcon(desktopIcon) ?: return
+                    // a) 补齐预览槽：对齐 FolderIcon2x2.createOrRemoveView 的数量逻辑
                     runCatching {
-                        XposedHelpers.setIntField(
-                            param.thisObject,
-                            Const.F_DISPLAY_COUNT_MAX,
-                            maxOf(spec.maxCount, spec.gridCount)
-                        )
+                        val container = XposedHelpers.callMethod(desktopIcon, "getMPreviewContainer")
+                        if (container != null) {
+                            applyContainerSize(container as View, spec)
+                            // createOrRemoveView 依赖 mInfo.count() 与 mItemsMaxCount 比对
+                            XposedHelpers.callMethod(desktopIcon, "createOrRemoveView")
+                        }
+                    }.onFailure {
+                        XposedBridge.log("[${Const.TAG}] preview slots top-up failed: $it")
+                    }
+                    // b) 记下待写入的 DISPLAY_COUNT_MAX（宿主在 after 阶段写默认值，
+                    //    所以这里的值要在 after 再覆盖一次）
+                    XposedHelpers.setAdditionalInstanceField(
+                        param.thisObject, K_PENDING_DISPLAY_MAX, maxOf(spec.maxCount, spec.gridCount)
+                    )
+                }
+
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val pending = XposedHelpers.getAdditionalInstanceField(
+                        param.thisObject, K_PENDING_DISPLAY_MAX
+                    ) as? Int ?: return
+                    runCatching {
+                        XposedHelpers.setIntField(param.thisObject, Const.F_DISPLAY_COUNT_MAX, pending)
                     }.onFailure {
                         XposedBridge.log("[${Const.TAG}] set DISPLAY_COUNT_MAX failed: $it")
                     }
@@ -505,39 +535,23 @@ object LayoutHook {
             }
         })
 
-        // 3. 收起动画（全屏文件夹返回桌面）平滑补间：
-        // 在收起动画开始时，确保桌面容器上的全部 18 个图标同步淡入，
-        // 并在动画结束时保证所有图标处于完全可见与正确缩放状态，杜绝后排图标卡顿滞后冒出。
-        val preFolderGridAnim = controller.declaredMethods.firstOrNull {
-            it.name == "preFolderGridAnim" && it.parameterTypes.size == 2
-        }
-        if (preFolderGridAnim != null) {
-            XposedBridge.hookMethod(preFolderGridAnim, object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: MethodHookParam) {
-                    val isFolderOpen = param.args[0] as? Boolean ?: return
-                    if (!isFolderOpen) {
-                        val desktopIcon = runCatching {
-                            XposedHelpers.getObjectField(param.thisObject, "mFolderDesktopIcon") as? View
-                        }.getOrNull() ?: return
-                        if (specOfIcon(desktopIcon) == null) return
-                        val container = runCatching {
-                            XposedHelpers.callMethod(desktopIcon, "getMPreviewContainer") as? ViewGroup
-                        }.getOrNull() ?: return
-                        for (i in 0 until container.childCount) {
-                            val child = container.getChildAt(i) ?: continue
-                            child.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(220).start()
-                        }
-                    }
-                }
-            })
-        }
-
+        // 3. 收起动画（v1.1.3 移除补间冲突）：
+        // v1.1.2 在 preFolderGridAnim 里对预览容器子 View 叠加 ViewPropertyAnimator
+        // alpha/scale 补间，与宿主 Folme 弹簧动画体系（setGridViewItemFolme ->
+        // handleCloseGridItemState 驱动同一批 View）直接冲突：两套动画引擎同时写
+        // 同一属性，结束时互相覆盖 —— 这正是「先飞回前 9 个、停顿、后 9 个突现」的
+        // 直接原因。正本清源的做法是保证 DISPLAY_COUNT_MAX = 21 + 预览槽补齐
+        // （见 setupView hook），让全部 18 个图标都进入宿主原生
+        // setGridViewItemFolme 飞行分支，不再需要任何外挂补间。
+        // folderAnimEnd 的兜底恢复保留（动画结束后强制可见，防个别 View 残留半透明）。
         val folderAnimEnd = controller.declaredMethods.firstOrNull {
             it.name == "folderAnimEnd" && it.parameterTypes.size == 1
         }
         if (folderAnimEnd != null) {
             XposedBridge.hookMethod(folderAnimEnd, object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
+                    val isFolderOpen = param.args[0] as? Boolean ?: true
+                    if (isFolderOpen) return // 只在收起动画结束时兜底
                     val desktopIcon = runCatching {
                         XposedHelpers.getObjectField(param.thisObject, "mFolderDesktopIcon") as? View
                     }.getOrNull() ?: return
@@ -547,6 +561,7 @@ object LayoutHook {
                     }.getOrNull() ?: return
                     for (i in 0 until container.childCount) {
                         val child = container.getChildAt(i) ?: continue
+                        child.animate().cancel()
                         child.alpha = 1f
                         child.scaleX = 1f
                         child.scaleY = 1f
