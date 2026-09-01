@@ -32,6 +32,11 @@ object Const {
      * 两模块短暂并存、或从 HyperOShape 迁移已有的三宫格文件夹，DB 里
      * 已落库的 itemType 能被本模块原样识别，无需数据迁移。
      */
+    // 宿主原生 itemType 取值
+    const val FOLDER_NORMAL = 2
+    const val FOLDER_2X2_4 = 21
+    const val FOLDER_2X2_9 = 22
+
     const val FOLDER_18_GRID = 0x20018
     const val FOLDER_3X1 = 0x20013
     const val FOLDER_1X3 = 0x20031
@@ -166,6 +171,9 @@ object Const {
 
     const val F_VISUAL_CHECK_GROUP = "mVisualCheckGroup"
     const val F_DEFAULT_CHECK_BOX = "mDefaultFolderCheckBox"
+    const val F_DEFAULT_FOLDER_CHECK_BOX = "mDefaultFolderCheckBox"
+    const val F_BIG_FOLDER_CHECK_BOX_2X2_4 = "mBigFolderCheckBox2x2_4"
+    const val F_BIG_FOLDER_CHECK_BOX_2X2_9 = "mBigFolderCheckBox2x2_9"
     const val F_BIG_CHECK_BOX_2X2_9 = "mBigFolderCheckBox2x2_9"
     const val F_BIG_FOLDER_NAME_2X2_9 = "mBigFolderName2x2_9"
 

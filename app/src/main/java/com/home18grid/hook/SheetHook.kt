@@ -260,10 +260,10 @@ object SheetHook {
     }
 
     private fun hookHostSwitchMethods(sheetClass: Class<*>) {
-        val methods = arrayOf(
-            "switchToDefaultFolder" to Const.FOLDER_NORMAL,
-            "switchToBigFolder2x2_4" to Const.FOLDER_2X2_4,
-            "switchToBigFolder2x2_9" to Const.FOLDER_2X2_9
+        val methods = arrayOf<Pair<String, Int>>(
+            Pair("switchToDefaultFolder", Const.FOLDER_NORMAL),
+            Pair("switchToBigFolder2x2_4", Const.FOLDER_2X2_4),
+            Pair("switchToBigFolder2x2_9", Const.FOLDER_2X2_9)
         )
         for ((name, type) in methods) {
             runCatching {
