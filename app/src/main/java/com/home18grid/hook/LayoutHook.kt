@@ -7,48 +7,154 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 
 /**
- * 渲染层 Hook：把 itemType = 0x20018 的文件夹画成 6x3 的 18 格。
+ * 渲染层 Hook：把三种自定义 itemType 的文件夹画成对应的网格，并让它们各自
+ * 拥有独立的展开动画载体（独立载体方案，彻底摆脱与宿主九宫格共享单例的污染）。
  *
- * 三条链路：
+ * 支持的类型（见 Const.SPECS）：
+ *   0x20018  6x3  18 宫格
+ *   0x20013  3x1  横向三宫格
+ *   0x20031  1x3  纵向三宫格
  *
- * 1. FolderIcon.fromXml(ILauncher, ViewGroup, FolderInfo, boolean, IFolder)
- *    宿主原实现只按 0x16 / 0x15 选大文件夹布局，0x20018 会 fallback 到
- *    folder_icon_1x1，导致 18 宫格文件夹显示成普通小图标。
- *    改成让它走 folder_icon_2x2_9（res/q8h.xml），从而复用宿主已经调好的
- *    FolderIcon2x2_9 + LauncherFolder2x2IconContainer + 预览容器整套层级。
+ * 六条链路：
  *
- * 2. FolderIcon2x2_9 的构造里写死 mLargeIconNum=8 / mItemsMaxCount=12 /
- *    mIconColumCount=3（三个 protected setter 在父类 FolderIcon2x2 上）。
- *    在 setup / createOrRemoveView2 时按实际 itemType 改成 17 / 21。
- *    mLargeIconNum = 17 是"前 17 个图标都能直接点击启动"的开关：
- *    onMeasureChild2x2 里 index < mLargeIconNum 的子 View 才会被
- *    setIconViewType(BIGICONVIEW)，其余走第 18 格里的小图标。
- *    mIconColumCount 保持宿主原值 3（它只被展开动画读，改了会带崩九宫格，
- *    详见 hookAnimIconLoc）。
+ * 1. hookClingInflate —— FolderCling.onFinishInflate 之后，为每种 spec 各
+ *    inflate 一个 folder_icon_2x2_9 布局实例 addView 进 cling，赋一个运行期
+ *    生成的 view id，并把 (itemType -> viewId) 记在 cling 的附加字段上。
+ *    这些实例就是各类型专属的动画载体，互不干扰，也不碰宿主原生的三个占位。
  *
- * 3. FolderIconPreviewContainer2X2_9 的三个布局方法
- *    (preMeasure2x2 / preSetup2x2 / getSmallItemsRectF)
- *    整体交给 FolderPreviewContainer6X3 的等分算法接管。
+ * 2. hookClingLayout —— determineLayoutResource(info) 对自定义类型返回上一步
+ *    生成的专属 view id，于是 loadAnimFolderIcon 的 findViewById 取到的是我们
+ *    自己的载体，check-cast FolderIcon 成立（布局本身就是 FolderIcon2x2_9）。
+ *
+ * 3. hookFromXml —— 桌面端 FolderIcon.fromXml 对自定义类型改用 folder_icon_2x2_9
+ *    布局，复用宿主 FolderIcon2x2_9 + 预览容器整套层级。
+ *
+ * 4. hookFolderIconSizes —— 桌面端与动画载体的 FolderIcon2x2 在 setup /
+ *    createOrRemoveView(2) 时按 spec 写 mLargeIconNum / mItemsMaxCount，
+ *    并按 spec 设 mIconColumCount（独立载体后可自由设，不再污染九宫格）。
+ *
+ * 5. hookIconContainerSpan —— LauncherFolder2x2IconContainer.onMeasure 时按
+ *    spec 把 cellX / cellY 改成目标占位，预览区撑成正确的长条 / 方块。
+ *
+ * 6. hookPreviewContainer —— FolderIconPreviewContainer2X2_9 的三个布局方法
+ *    交给 GridPreviewContainer 等分算法接管（仅挂了 helper 的实例才接管）。
+ *
+ * 7. hookAnimIconLoc —— FolderAnimController.initIconLoc 对自定义类型直接按
+ *    spec 构造恒等映射表，保证展开 / 收起动画里预览图标飞向正确的网格位置。
  */
 object LayoutHook {
 
+    /** cling 上记 (itemType -> 专属动画载体 view id) 的附加字段 */
+    private const val KEY_CLING_IDS = "home18grid_cling_ids"
+
     fun install(cl: ClassLoader) {
+        hookClingInflate(cl)
+        hookClingLayout(cl)
         hookFromXml(cl)
         hookFolderIconSizes(cl)
         hookIconContainerSpan(cl)
         hookPreviewContainer(cl)
-        hookClingLayout(cl)
         hookAnimIconLoc(cl)
     }
 
-    // ------------------------------------------------------------------
-    // 1. 布局选择
-    // ------------------------------------------------------------------
+    // ==================================================================
+    // 1. 独立动画载体：为每种 spec 造一个专属 FolderIcon
+    // ==================================================================
+    private fun hookClingInflate(cl: ClassLoader) {
+        val cling = XposedHelpers.findClass(Const.CLS_FOLDER_CLING, cl)
+        val folderIcon = XposedHelpers.findClass(Const.CLS_FOLDER_ICON, cl)
+        val inflater = inflaterOf(folderIcon) ?: return
 
+        XposedHelpers.findAndHookMethod(
+            cling, "onFinishInflate",
+            object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val group = param.thisObject as? ViewGroup ?: return
+                    if (XposedHelpers.getAdditionalInstanceField(group, KEY_CLING_IDS) != null) return
+
+                    val layoutId = HostRes.layout(group.context, Const.RES_LAYOUT_FOLDER_ICON_2X2_9)
+                    if (layoutId == 0) {
+                        XposedBridge.log("[${Const.TAG}] cling inflate: layout missing")
+                        return
+                    }
+
+                    val ids = HashMap<Int, Int>()
+                    for (spec in Const.SPECS.values) {
+                        runCatching {
+                            val icon = inflater.invoke(
+                                null, layoutId, null, group, null, null
+                            ) as View
+                            val viewId = View.generateViewId()
+                            icon.id = viewId
+                            icon.visibility = View.GONE
+                            XposedHelpers.setAdditionalInstanceField(
+                                icon, Const.KEY_CLING_SPEC, spec
+                            )
+                            group.addView(icon)
+                            ids[spec.itemType] = viewId
+                        }.onFailure {
+                            XposedBridge.log(
+                                "[${Const.TAG}] cling carrier inflate failed for ${spec.itemType}: $it"
+                            )
+                        }
+                    }
+                    XposedHelpers.setAdditionalInstanceField(group, KEY_CLING_IDS, ids)
+                }
+            }
+        )
+    }
+
+    /** FolderIcon.fromXml(int layoutId, ILauncher, ViewGroup, FolderInfo, IFolder) —— 真正 inflate 的重载 */
+    private fun inflaterOf(folderIcon: Class<*>): java.lang.reflect.Method? {
+        val m = folderIcon.declaredMethods.firstOrNull {
+            it.name == "fromXml" &&
+                it.parameterTypes.size == 5 &&
+                it.parameterTypes[0] == Int::class.javaPrimitiveType
+        }
+        if (m == null) {
+            XposedBridge.log("[${Const.TAG}] FolderIcon.fromXml(int,...) not found")
+        } else {
+            m.isAccessible = true
+        }
+        return m
+    }
+
+    // ==================================================================
+    // 2. determineLayoutResource：自定义类型返回专属载体 id
+    // ==================================================================
+    private fun hookClingLayout(cl: ClassLoader) {
+        val cling = XposedHelpers.findClass(Const.CLS_FOLDER_CLING, cl)
+        val folderInfo = XposedHelpers.findClass(Const.CLS_FOLDER_INFO, cl)
+
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                cling, "determineLayoutResource", folderInfo,
+                object : XC_MethodHook() {
+                    @Suppress("UNCHECKED_CAST")
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val info = param.args[0] ?: return
+                        val itemType = DataHook.itemTypeOf(info)
+                        if (!Const.isCustomFolder(itemType)) return
+
+                        val group = param.thisObject as? View ?: return
+                        val ids = XposedHelpers.getAdditionalInstanceField(group, KEY_CLING_IDS)
+                            as? Map<Int, Int> ?: return
+                        val viewId = ids[itemType] ?: return
+                        param.result = viewId
+                    }
+                }
+            )
+        }.onFailure {
+            XposedBridge.log("[${Const.TAG}] determineLayoutResource hook failed: $it")
+        }
+    }
+
+    // ==================================================================
+    // 3. 桌面端布局选择：自定义类型走 folder_icon_2x2_9
+    // ==================================================================
     private fun hookFromXml(cl: ClassLoader) {
         val folderIcon = XposedHelpers.findClass(Const.CLS_FOLDER_ICON, cl)
 
-        // 5 参、第 4 个参数是 boolean 的重载做布局判定
         val decider = folderIcon.declaredMethods.firstOrNull { m ->
             m.name == "fromXml" &&
                 m.parameterTypes.size == 5 &&
@@ -57,35 +163,22 @@ object LayoutHook {
             XposedBridge.log("[${Const.TAG}] FolderIcon.fromXml(...,boolean,...) not found")
             return
         }
-
-        // 5 参、第 1 个参数是 int(layoutId) 的重载才真正 inflate
-        val inflater = folderIcon.declaredMethods.firstOrNull { m ->
-            m.name == "fromXml" &&
-                m.parameterTypes.size == 5 &&
-                m.parameterTypes[0] == Int::class.javaPrimitiveType
-        } ?: run {
-            XposedBridge.log("[${Const.TAG}] FolderIcon.fromXml(int,...) not found")
-            return
-        }
-        inflater.isAccessible = true
+        val inflater = inflaterOf(folderIcon) ?: return
 
         XposedBridge.hookMethod(decider, object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
                 val info = param.args[2] ?: return
-                if (DataHook.itemTypeOf(info) != Const.FOLDER_18_GRID) return
+                if (!Const.isCustomFolder(DataHook.itemTypeOf(info))) return
 
                 val container = param.args[1] as? ViewGroup ?: return
                 val layoutId =
                     HostRes.layout(container.context, Const.RES_LAYOUT_FOLDER_ICON_2X2_9)
                 if (layoutId == 0) {
-                    XposedBridge.log(
-                        "[${Const.TAG}] layout ${Const.RES_LAYOUT_FOLDER_ICON_2X2_9} missing," +
-                            " fall back to host behaviour"
-                    )
+                    XposedBridge.log("[${Const.TAG}] fromXml: layout missing, fall back")
                     return
                 }
-
-                // 直接替换返回值，跳过宿主原本的 if-else 布局判定
+                // decider 是 (ILauncher, ViewGroup, FolderInfo, boolean, IFolder)
+                // inflater 是 (int, ILauncher, ViewGroup, FolderInfo, IFolder)
                 param.result = inflater.invoke(
                     null, layoutId, param.args[0], param.args[1], param.args[2], param.args[4]
                 )
@@ -93,32 +186,28 @@ object LayoutHook {
         })
     }
 
-    // ------------------------------------------------------------------
-    // 2. 图标数量与列数
-    // ------------------------------------------------------------------
-
-    /**
-     * 构造阶段 mInfo 还没绑定，无法判断 itemType，所以改在 setup 之后：
-     * FolderIcon2x2.setup(IFolderInfo, IFolder) 时 FolderIcon.mInfo 已由
-     * fromXml(int,...) 写入（iput-object p3, v0, FolderIcon->mInfo）。
-     */
+    // ==================================================================
+    // 4. 图标数量与列数（桌面端 + 独立动画载体）
+    // ==================================================================
     private fun hookFolderIconSizes(cl: ClassLoader) {
         val icon2x2 = XposedHelpers.findClass(Const.CLS_FOLDER_ICON_2X2, cl)
 
+        // setup(IFolderInfo, IFolder)：桌面端此时 mInfo 已绑定；
+        // 独立动画载体走 configureAnimFolderIcon 的 setup(null, manager)，mInfo=null，
+        // 此时靠载体上挂的 KEY_CLING_SPEC 判定类型。
         val setup = icon2x2.declaredMethods.firstOrNull {
             it.name == "setup" && it.parameterTypes.size == 2
-        } ?: run {
+        }
+        if (setup != null) {
+            XposedBridge.hookMethod(setup, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    applyIfMatched(param.thisObject as? View ?: return)
+                }
+            })
+        } else {
             XposedBridge.log("[${Const.TAG}] FolderIcon2x2.setup not found")
-            return
         }
 
-        XposedBridge.hookMethod(setup, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                applyIfMatched(param.thisObject as? View ?: return)
-            }
-        })
-
-        // 增删应用时宿主会重建预览子 View，重新确认一次尺寸参数
         runCatching {
             XposedHelpers.findAndHookMethod(
                 icon2x2, "createOrRemoveView",
@@ -130,33 +219,16 @@ object LayoutHook {
             )
         }
 
-        /**
-         * createOrRemoveView2 才是 loadItemIcons / onIconRemoved / rebindInfo
-         * 实际走的那条路，而它开头会按 `this is FolderIcon2x2_9` 把
-         * mItemsMaxCount / mLargeIconNum / mLargeIconNum2 重新写回 12/8/8
-         * （ENH 补丁版还会看 SmaliDedicatedSettingManager4.mRealLargeFolder）。
-         *
-         * 只在之后补写数量是没用的：同一个方法里紧接着就用 getItemsMaxCount()
-         * 算出该建几个子 View，并调 addItemOnclickListener 按 mLargeIconNum2
-         * 决定哪些图标可直接点击。所以这里整段接管：
-         *   先按 18 宫格写好数量，再调 createOrRemoveView()——
-         *   它是 createOrRemoveView2 去掉「重置数量」那一段后剩下的同样逻辑
-         *   （diff 子 View 数量 + addItemOnclickListener），不碰任何计数字段。
-         */
+        // createOrRemoveView2 会按 `this is FolderIcon2x2_9` 把数量重置回 12/8/8，
+        // 所以整段接管：先按 spec 写好数量，再调 createOrRemoveView() 走剩余逻辑。
         runCatching {
             XposedHelpers.findAndHookMethod(
                 icon2x2, "createOrRemoveView2",
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val icon = param.thisObject as? View ?: return
-                        val info = runCatching {
-                            XposedHelpers.getObjectField(icon, "mInfo")
-                        }.getOrNull() ?: return
-
-                        // 无条件跑一次：18 宫格写入数量+helper，其他类型摘掉 helper
+                        val spec = specOfIcon(icon) ?: return
                         applyIfMatched(icon)
-                        if (DataHook.itemTypeOf(info) != Const.FOLDER_18_GRID) return
-
                         param.result = null
                         runCatching { XposedHelpers.callMethod(icon, "createOrRemoveView") }
                             .onFailure {
@@ -170,82 +242,63 @@ object LayoutHook {
         }
     }
 
-    private fun applyIfMatched(icon: View) {
-        val info = runCatching {
-            XposedHelpers.getObjectField(icon, "mInfo")
-        }.getOrNull() ?: return
+    /**
+     * 判定一个 FolderIcon 属于哪个 spec：
+     *   桌面端图标  -> mInfo.itemType
+     *   独立动画载体 -> 载体上挂的 KEY_CLING_SPEC
+     */
+    private fun specOfIcon(icon: View): Const.GridSpec? {
+        val bySpec = XposedHelpers.getAdditionalInstanceField(icon, Const.KEY_CLING_SPEC)
+            as? Const.GridSpec
+        if (bySpec != null) return bySpec
+        val info = runCatching { XposedHelpers.getObjectField(icon, "mInfo") }.getOrNull()
+            ?: return null
+        return Const.specOf(DataHook.itemTypeOf(info))
+    }
 
-        // mPreviewContainer 是 public 字段，setup 里由 findViewById 赋值
+    private fun applyIfMatched(icon: View) {
+        val spec = specOfIcon(icon) ?: return
+
         val container = runCatching {
             XposedHelpers.getObjectField(icon, "mPreviewContainer") as? View
         }.getOrNull()
 
-        if (DataHook.itemTypeOf(info) != Const.FOLDER_18_GRID) {
-            // 见 detachHelper 注释：这一步是 FolderCling 共享动画图标的必要善后
-            container?.let { detachHelper(it) }
-            return
-        }
-
-        /**
-         * 数量三件套。注意**不动** mIconColumCount：
-         * 它唯一的读者是 FolderAnimController.setupView，把它改成 6 会让
-         * 宿主九宫格的动画映射表也失效（详见 hookAnimIconLoc）。18 宫格
-         * 自己的映射表由 hookAnimIconLoc 直接构造，不依赖这个字段。
-         */
+        // 独立载体后可放心设 mIconColumCount：每种类型有自己的载体，不再和九宫格共享。
         runCatching {
-            XposedHelpers.callMethod(icon, "setMLargeIconNum", Const.LARGE_COUNT)
-            XposedHelpers.callMethod(icon, "setMLargeIconNum2", Const.LARGE_COUNT)
-            XposedHelpers.callMethod(icon, "setMItemsMaxCount", Const.MAX_COUNT)
+            XposedHelpers.callMethod(icon, "setMLargeIconNum", spec.largeCount)
+            XposedHelpers.callMethod(icon, "setMLargeIconNum2", spec.largeCount)
+            XposedHelpers.callMethod(icon, "setMItemsMaxCount", spec.maxCount)
+            XposedHelpers.callMethod(icon, "setMIconColumCount", spec.columns)
         }.onFailure {
             XposedBridge.log("[${Const.TAG}] FolderIcon2x2 size setters failed: $it")
         }
 
-        container?.let { applyContainerSize(it) }
+        container?.let { applyContainerSize(it, spec) }
     }
 
-    /**
-     * 给预览容器装上 6x3 算法并同步数量上限。
-     * mLargeIconNum / mItemsMaxCount 的 setter 在
-     * BaseFolderIconPreviewContainer2X2 上（protected final）。
-     */
-    fun applyContainerSize(container: View) {
-        if (XposedHelpers.getAdditionalInstanceField(container, Const.KEY_HELPER) == null) {
+    /** 给预览容器装上对应 spec 的算法辅助类并同步数量上限 */
+    fun applyContainerSize(container: View, spec: Const.GridSpec) {
+        val existing = helperOf(container)
+        if (existing == null || existing.specItemType != spec.itemType) {
             XposedHelpers.setAdditionalInstanceField(
-                container, Const.KEY_HELPER, FolderPreviewContainer6X3(container)
+                container, Const.KEY_HELPER, GridPreviewContainer(container, spec)
             )
         }
-
         runCatching {
-            XposedHelpers.callMethod(container, "setMLargeIconNum", Const.LARGE_COUNT)
-            XposedHelpers.callMethod(container, "setMItemsMaxCount", Const.MAX_COUNT)
+            XposedHelpers.callMethod(container, "setMLargeIconNum", spec.largeCount)
+            XposedHelpers.callMethod(container, "setMItemsMaxCount", spec.maxCount)
         }.onFailure {
             XposedBridge.log("[${Const.TAG}] preview container size setters failed: $it")
         }
     }
 
-    private fun helperOf(view: View): FolderPreviewContainer6X3? =
+    private fun helperOf(view: View): GridPreviewContainer? =
         XposedHelpers.getAdditionalInstanceField(view, Const.KEY_HELPER)
-            as? FolderPreviewContainer6X3
+            as? GridPreviewContainer
 
-    /**
-     * 摘掉 6x3 算法辅助类，让容器回到宿主原生的 preMeasure2x2 / preSetup2x2。
-     *
-     * 为什么必须有这一步：FolderCling 的布局里只预置了**一个**
-     * `folder_icon_2x2_9` 占位 View，宿主九宫格和我们的 18 宫格
-     * 打开时共用同一个实例（determineLayoutResource 现在两者都指向它）。
-     * 一旦某次 18 宫格打开时给它的预览容器挂上了 helper，之后打开宿主
-     * 九宫格时这个 helper 还在，展开动画里的图标就会按 6x3 排布，
-     * 与桌面上真实的 3x3 图标位置对不上，肉眼看就是「回弹时顿一下」。
-     */
-    private fun detachHelper(container: View) {
-        if (XposedHelpers.getAdditionalInstanceField(container, Const.KEY_HELPER) != null) {
-            XposedHelpers.setAdditionalInstanceField(container, Const.KEY_HELPER, null)
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // 3. 预览区物理尺寸（方块 → 整行长条）
-    // ------------------------------------------------------------------
+    // ==================================================================
+    // 5. 预览区物理尺寸（方块 -> 目标占位形状）
+    // ==================================================================
 
     /**
      * LauncherFolder2x2IconContainer 是 folder_icon_2x2_9 里包住预览容器的那层
@@ -256,14 +309,15 @@ object LayoutHook {
      *     width  = spec >> 32   // 由 cellX 算出
      *     height = (int) spec   // 由 cellY 算出
      *
-     * 也就是说不管上层 spanX/spanY 给了多少，这一层永远按 2x2 量出一个正方形，
-     * 6 列图标塞进 2 格宽 → 每个图标只有 1/3 格宽，就是「方块里一堆小点」。
+     * 不管上层 spanX/spanY 给了多少，这一层永远按 2x2 量出一个正方形。
+     * 各类型的真实形状要在这里写入：
+     *   18 宫格 6x3：cellX = 桌面列数（占满整行），cellY = 2
+     *   横三宫格 3x1：cellX = 2，cellY = 1（横向长条）
+     *   纵三宫格 1x3：cellX = 1，cellY = 2（纵向长条）
      *
-     * 这里在 onMeasure 之前把 cellX 改成桌面列数、cellY 改成 2，
-     * 预览区才会真正撑成「整行宽 × 2 格高」，18 个图标接近桌面原生图标大小。
-     *
-     * 只改属于 0x20018 的那些实例：沿 parent 链找到 FolderIcon，读 mInfo.itemType 判定。
-     * 宿主原生 2x2_4 / 2x2_9 的容器不受影响。
+     * 只改属于自定义类型的实例：沿 parent 链找到 FolderIcon 读 mInfo.itemType；
+     * 动画载体也走这条路（载体的 mInfo 在 loadAnimFolderIcon 时绑定）。
+     * 宿主原生 2x2_4 / 2x2_9 的容器 spec 为 null，不受影响。
      */
     private fun hookIconContainerSpan(cl: ClassLoader) {
         val containerClass = XposedHelpers.findClass(Const.CLS_ICON_CONTAINER_2X2, cl)
@@ -275,13 +329,14 @@ object LayoutHook {
             object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val container = param.thisObject as? View ?: return
-                    if (!belongsTo18Grid(container)) return
+                    val spec = specOfParentIcon(container) ?: return
 
                     runCatching {
-                        XposedHelpers.setIntField(
-                            container, Const.F_CELL_X, DataHook.cellCountX(deviceConfigs)
-                        )
-                        XposedHelpers.setIntField(container, Const.F_CELL_Y, Const.SPAN_Y)
+                        val cellX = if (spec.spanX == -1) {
+                            DataHook.cellCountX(deviceConfigs)
+                        } else spec.spanX
+                        XposedHelpers.setIntField(container, Const.F_CELL_X, cellX)
+                        XposedHelpers.setIntField(container, Const.F_CELL_Y, spec.spanY)
                     }.onFailure {
                         XposedBridge.log("[${Const.TAG}] icon container span failed: $it")
                     }
@@ -289,159 +344,38 @@ object LayoutHook {
             }
         )
     }
-    /** 沿 parent 链向上找宿主 FolderIcon，判断它是否是 18 宫格 */
-    private fun belongsTo18Grid(view: View): Boolean {
-        var p = view.parent
+
+    /** 沿 parent 链向上找宿主 FolderIcon，返回它的 spec（不是自定义类型则 null） */
+    private fun specOfParentIcon(view: View): Const.GridSpec? {
+        var p: Any? = view
         var depth = 0
         while (p is View && depth < 4) {
+            // 动画载体自身挂着 KEY_CLING_SPEC，优先识别
+            XposedHelpers.getAdditionalInstanceField(p, Const.KEY_CLING_SPEC)
+                ?.let { return it as Const.GridSpec }
             val info = runCatching { XposedHelpers.getObjectField(p, "mInfo") }.getOrNull()
-            if (info != null) return DataHook.itemTypeOf(info) == Const.FOLDER_18_GRID
+            if (info != null) return Const.specOf(DataHook.itemTypeOf(info))
             p = p.parent
             depth++
         }
-        return false
+        return null
     }
 
-    // ------------------------------------------------------------------
-    // 3.5 打开动画的图标类型路由（点击文件夹闪退的根因）
-    // ------------------------------------------------------------------
+    // ==================================================================
+    // 6. 预览容器布局接管
+    // ==================================================================
 
-    /**
-     * FolderCling 里预置了三个 FolderIcon 占位 View（1x1 / 2x2_4 / 2x2_9），
-     * 打开文件夹时 initAnimFolderIcon -> loadAnimFolderIcon 用
-     * determineLayoutResource(info) 三选一，findViewById 出来当动画载体：
-     *
-     *   itemType == 0x15 -> R.id.folder_icon_2x2_4
-     *   itemType == 0x16 -> R.id.folder_icon_2x2_9
-     *   其他             -> R.id.folder_icon_1x1
-     *
-     * 0x20018 落到最后一档，动画载体就是 FolderIcon1x1；紧接着
-     * setupAnimFolderIcon -> FolderIcon.loadIconPreViews(info) 里按
-     * 桌面端 buddyIconView（我们的 FolderIcon2x2_9）走 instanceof FolderIcon2x2
-     * 分支，把自身 check-cast 成 FolderIcon2x2，于是：
-     *
-     *   ClassCastException: FolderIcon1x1 cannot be cast to FolderIcon2x2
-     *
-     * 这里让 0x20018 也返回 folder_icon_2x2_9 的 view id，动画载体与桌面端
-     * 图标类型一致，强转成立。返回 0（资源名找不到）时不改，退回宿主行为。
-     */
-    private fun hookClingLayout(cl: ClassLoader) {
-        val cling = XposedHelpers.findClass(Const.CLS_FOLDER_CLING, cl)
-        val folderInfo = XposedHelpers.findClass(Const.CLS_FOLDER_INFO, cl)
-
-        runCatching {
-            XposedHelpers.findAndHookMethod(
-                cling, "determineLayoutResource", folderInfo,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: MethodHookParam) {
-                        val info = param.args[0] ?: return
-                        if (DataHook.itemTypeOf(info) != Const.FOLDER_18_GRID) return
-
-                        val view = param.thisObject as? View ?: return
-                        val id = HostRes.viewId(view.context, Const.RES_ID_FOLDER_ICON_2X2_9)
-                        if (id == 0) {
-                            XposedBridge.log(
-                                "[${Const.TAG}] id ${Const.RES_ID_FOLDER_ICON_2X2_9} missing," +
-                                    " folder open would crash"
-                            )
-                            return
-                        }
-                        param.result = id
-                    }
-                }
-            )
-        }.onFailure {
-            XposedBridge.log("[${Const.TAG}] determineLayoutResource hook failed: $it")
-        }
-    }
-
-
-    // ------------------------------------------------------------------
-    // 3.6 展开动画的预览图标映射（第一个图标漂浮在文件夹上方）
-    // ------------------------------------------------------------------
-
-    /**
-     * FolderAnimController.setupView 里：
-     *
-     *   p2 = folderIconAnimView.getIconColumCount()
-     *   if (SmaliDedicatedSettingManager4.mFolderColumnNumber != 3) p2 = mFolderColumnNumber
-     *   initIconLoc(mFolderColumnNumber, p2, itemType, folderIcon)
-     *
-     * initIconLoc 只有两条能填 mFolderIconLocMap 的路径：
-     *   p2 == p1（列数一致）  -> 填 i->i 的恒等映射，返回 min(p2*p2-1, 末位)
-     *   itemType == 0x15     -> 走 2x2_4 的专用映射
-     *   其余                 -> 直接 return 0，映射表**保持为空**
-     *
-     * 空表的后果在 preFolderIconAnim 里：
-     *
-     *   for (key in map.keySet()) { ...把预览图标飞到网格位置... }   // 空表，什么都不做
-     *   for (i in mLastItemIndex + 1 until previewArray.size)        // mLastItemIndex = 0
-     *       addSmallFolderPreViewAnim(...)                           // 从 1 开始
-     *
-     * 下标 0 两个循环都没覆盖，位置和 alpha 都没人动，于是它以桌面上的
-     * 原样停在展开后的文件夹上方 —— 就是那个「漂浮的第一个图标」。
-     * 其余下标虽然有动画，但走的是「收尾小图标」那条，不是飞向网格对应
-     * 位置，所以观感上还会顿一下。
-     *
-     * 注意 `getIconColumCount()` 读的是 mIconColumCount，而它**不能**改成 6：
-     * 宿主九宫格与 18 宫格共用 FolderIcon2x2 这一套 setter，一旦被改成 6，
-     * 九宫格自己也会 6 != 3 落进空表分支，于是九宫格也出现漂浮图标。
-     * 所以这里不动那个字段，改为直接为 0x20018 构造映射表。
-     *
-     * 建表规则对齐宿主九宫格的分工：它填 0..8 共 9 个下标、返回 8，
-     * 余下 9..11 交给 addSmallFolderPreViewAnim 收尾。按 18 格换算即
-     * 填 0..17、返回 17，余下 18..20 走收尾动画。
-     *
-     * 应用数少于 18 个时不用额外处理：宿主自己会判
-     * key >= min(previewArray.size, desktopImageViews.size) 就跳过，
-     * 以及网格子 View 不够时把该预览 alpha 置 0。
-     */
-    private fun hookAnimIconLoc(cl: ClassLoader) {
-        val controller = XposedHelpers.findClass(Const.CLS_FOLDER_ANIM_CONTROLLER, cl)
-
-        val initIconLoc = controller.declaredMethods.firstOrNull {
-            it.name == "initIconLoc" && it.parameterTypes.size == 4
-        } ?: run {
-            XposedBridge.log("[${Const.TAG}] FolderAnimController.initIconLoc not found")
-            return
-        }
-
-        XposedBridge.hookMethod(initIconLoc, object : XC_MethodHook() {
-            @Suppress("UNCHECKED_CAST")
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                if (param.args[2] != Const.FOLDER_18_GRID) return
-
-                val map = runCatching {
-                    XposedHelpers.getObjectField(param.thisObject, Const.F_ICON_LOC_MAP)
-                        as? MutableMap<Int, Int>
-                }.getOrNull() ?: run {
-                    XposedBridge.log("[${Const.TAG}] ${Const.F_ICON_LOC_MAP} missing")
-                    return
-                }
-
-                map.clear()
-                for (i in 0 until Const.GRID_COUNT) map[i] = i
-                param.result = Const.GRID_COUNT - 1
-            }
-        })
-    }
-
-    // ------------------------------------------------------------------
-    // 4. 预览容器布局接管
-    // ------------------------------------------------------------------
     /**
      * 只有挂了 helper 的实例才被接管（helper 由 applyContainerSize 挂载），
      * 宿主原生 0x15 / 0x16 的容器拿不到 helper，会原样走自己的实现。
-     * 这是「与 HyperOShape 等其他模块共存、互不干扰」的基础。
+     * 这是「与其他模块共存、互不干扰」的基础。
      *
-     * 桌面上的容器由 applyIfMatched() 挂 helper（走 mInfo.itemType 判定），
-     * FolderSheet 里手 new 的那个由 SheetHook.injectPreview() 直接挂，
-     * 因此这里不需要 hook 构造函数（三参构造的第 3 个参数是 defStyleAttr，
-     * 不是 itemType，不能用来判定类型）。
+     * 桌面上的容器由 applyIfMatched() 挂 helper（走 mInfo.itemType / KEY_CLING_SPEC
+     * 判定），FolderSheet 里手 new 的那个由 SheetHook.injectPreview() 直接挂，
+     * 因此这里不需要 hook 构造函数。
      */
     private fun hookPreviewContainer(cl: ClassLoader) {
         val containerClass = XposedHelpers.findClass(Const.CLS_PREVIEW_CONTAINER_2X2_9, cl)
-
 
         XposedHelpers.findAndHookMethod(
             containerClass, "preMeasure2x2",
@@ -475,5 +409,66 @@ object LayoutHook {
                 }
             }
         )
+    }
+
+    // ==================================================================
+    // 7. 展开动画的预览图标映射
+    // ==================================================================
+
+    /**
+     * FolderAnimController.setupView 里：
+     *
+     *   p2 = folderIconAnimView.getIconColumCount()
+     *   if (SmaliDedicatedSettingManager4.mFolderColumnNumber != 3) p2 = mFolderColumnNumber
+     *   initIconLoc(mFolderColumnNumber, p2, itemType, folderIcon)
+     *
+     * initIconLoc 只有两条能填 mFolderIconLocMap 的路径：
+     *   p2 == p1（列数一致）  -> 填 i->i 的恒等映射，返回 min(p2*p2-1, 末位)
+     *   itemType == 0x15     -> 走 2x2_4 的专用映射
+     *   其余                 -> return 0，映射表**保持为空**
+     *
+     * 独立载体方案下，我们已按 spec 给载体设了 mIconColumCount
+     * （6 / 3 / 1），但全局 mFolderColumnNumber 恒为 3：
+     *   18 宫格 6 != 3、纵向 1x3 的 1 != 3 -> 仍落进空表分支 -> 漂浮图标
+     * 所以这里仍需对自定义类型直接构造映射表。
+     *
+     * 建表规则对齐宿主九宫格的分工：它填 0..8 共 9 个下标、返回 8，
+     * 余下 9..11 交给 addSmallFolderPreViewAnim 收尾。按各 spec 换算即
+     * 填 0..gridCount-1、返回 gridCount-1，余下走收尾动画：
+     *   6x3：填 0..17，返回 17，余下 18..20
+     *   3x1：填 0..2，返回 2，余下 3..5
+     *   1x3：填 0..2，返回 2，余下 3..5
+     *
+     * 应用数不足时不用额外处理：宿主自己会判
+     * key >= min(previewArray.size, desktopImageViews.size) 就跳过。
+     */
+    private fun hookAnimIconLoc(cl: ClassLoader) {
+        val controller = XposedHelpers.findClass(Const.CLS_FOLDER_ANIM_CONTROLLER, cl)
+
+        val initIconLoc = controller.declaredMethods.firstOrNull {
+            it.name == "initIconLoc" && it.parameterTypes.size == 4
+        } ?: run {
+            XposedBridge.log("[${Const.TAG}] FolderAnimController.initIconLoc not found")
+            return
+        }
+
+        XposedBridge.hookMethod(initIconLoc, object : XC_MethodHook() {
+            @Suppress("UNCHECKED_CAST")
+            override fun beforeHookedMethod(param: MethodHookParam) {
+                val spec = Const.specOf(param.args[2] as? Int ?: return) ?: return
+
+                val map = runCatching {
+                    XposedHelpers.getObjectField(param.thisObject, Const.F_ICON_LOC_MAP)
+                        as? MutableMap<Int, Int>
+                }.getOrNull() ?: run {
+                    XposedBridge.log("[${Const.TAG}] ${Const.F_ICON_LOC_MAP} missing")
+                    return
+                }
+
+                map.clear()
+                for (i in 0 until spec.gridCount) map[i] = i
+                param.result = spec.gridCount - 1
+            }
+        })
     }
 }

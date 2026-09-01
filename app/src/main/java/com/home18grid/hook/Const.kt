@@ -12,6 +12,9 @@ object Const {
     const val TAG = "Home18Grid"
     const val HOST = "com.miui.home"
 
+    // ================================================================
+    // 自定义文件夹类型表
+    // ================================================================
     /**
      * 自定义 itemType。
      *
@@ -20,17 +23,75 @@ object Const {
      *   21 (0x15)  大文件夹 2x2_4（四宫格）
      *   22 (0x16)  大文件夹 2x2_9（九宫格）
      *
-     * 取 0x20018 (131096) 避开宿主全部已用取值，同时便于在 SQL 与日志里辨识。
+     * 三个自定义取值都避开宿主已用取值，便于在 SQL 与日志里辨识：
+     *   0x20018 (131096)  18 宫格 6x3        —— 本模块原生
+     *   0x20013 (131091)  横向三宫格 3x1     —— 移植自 HyperOShape HM_FOLDER
+     *   0x20031 (131121)  纵向三宫格 1x3     —— 移植自 HyperOShape VM_FOLDER
+     *
+     * 沿用与 HyperOShape 相同的 0x20013 / 0x20031 取值，这样即便日后
+     * 两模块短暂并存、或从 HyperOShape 迁移已有的三宫格文件夹，DB 里
+     * 已落库的 itemType 能被本模块原样识别，无需数据迁移。
      */
     const val FOLDER_18_GRID = 0x20018
+    const val FOLDER_3X1 = 0x20013
+    const val FOLDER_1X3 = 0x20031
 
+    /**
+     * 一种自定义大文件夹的全部几何参数。
+     *
+     * @param itemType    数据库落库的类型标识
+     * @param columns     预览网格列数
+     * @param rows        预览网格行数
+     * @param spanX       桌面横向占位（-1 表示运行期取桌面列数，占满整行）
+     * @param spanY       桌面纵向占位
+     * @param clingViewId FolderCling 里为该类型 addView 的独立动画载体的 view id 名
+     */
+    class GridSpec(
+        val itemType: Int,
+        val columns: Int,
+        val rows: Int,
+        val spanX: Int,
+        val spanY: Int,
+        val clingViewId: String
+    ) {
+        /** 网格格子总数 */
+        val gridCount: Int get() = columns * rows
+        /**
+         * 大图标数 = 总格数 - 1，最后一格放小图标组（可直接点击启动的是前 large 个）。
+         * 3x1 / 1x3 时 gridCount=3，large=2、末格放 4 小图标，与 HyperOShape 一致
+         * （mLargeIconNum=2 / mItemsMaxCount=6）。
+         * 6x3 时 gridCount=18，large=17、末格放 4 小图标（mLargeIconNum=17 / max=21）。
+         */
+        val largeCount: Int get() = gridCount - 1
+        val smallCount: Int get() = SMALL_COUNT
+        val maxCount: Int get() = largeCount + smallCount
+    }
+
+    /** 所有自定义类型的几何规格表；itemType -> spec */
+    val SPECS: Map<Int, GridSpec> = linkedMapOf(
+        FOLDER_18_GRID to GridSpec(
+            itemType = FOLDER_18_GRID, columns = 6, rows = 3,
+            spanX = -1, spanY = 2, clingViewId = "h18g_cling_icon_6x3"
+        ),
+        FOLDER_3X1 to GridSpec(
+            itemType = FOLDER_3X1, columns = 3, rows = 1,
+            spanX = 2, spanY = 1, clingViewId = "h18g_cling_icon_3x1"
+        ),
+        FOLDER_1X3 to GridSpec(
+            itemType = FOLDER_1X3, columns = 1, rows = 3,
+            spanX = 1, spanY = 2, clingViewId = "h18g_cling_icon_1x3"
+        )
+    )
+
+    fun specOf(itemType: Int): GridSpec? = SPECS[itemType]
+    fun isCustomFolder(itemType: Int): Boolean = SPECS.containsKey(itemType)
+
+    // ---- 兼容旧代码的 18 宫格快捷常量（等价于 SPECS[FOLDER_18_GRID] 的字段） ----
     /** 6 列 x 3 行 = 18 个等大图标 */
     const val GRID_COLUMNS = 6
     const val GRID_ROWS = 3
-
     /** 网格格子总数 = 18 */
     const val GRID_COUNT = GRID_COLUMNS * GRID_ROWS
-
     /**
      * 前 17 格放大图标（可直接点击启动），第 18 格按宿主九宫格的做法
      * 塞 4 个 2x2 小图标，用来展示"还有更多"，点它打开文件夹。
@@ -39,19 +100,18 @@ object Const {
      * （前 8 格大图标 + 第 9 格内 4 个小图标）。
      */
     const val LARGE_COUNT = GRID_COUNT - 1
+    /** 末格内 2x2 小图标数，三种类型统一为 4 */
     const val SMALL_COUNT = 4
     const val MAX_COUNT = LARGE_COUNT + SMALL_COUNT
-
     /**
      * 图标边长占单元格的比例，剩下的留作间距。
      * 宿主 2x2_9 在 3 列下 edge 占 6.25%、inner 占 4.4%，折算到单格约 0.85。
      */
     const val ICON_RATIO = 0.86f
-
     /**
      * 桌面格位占用。18 宫格必须横向占满整行（宽 = 桌面列数），
      * 否则 6 列图标挤在 2 格宽度里会变成一堆小点。
-     * SPAN_X 运行期取 DeviceConfigs.getCellCountX()，这里只是取不到时的兜底。
+     * spanX = -1 的类型运行期取 DeviceConfigs.getCellCountX()，这里只是取不到时的兜底。
      */
     const val SPAN_X_FALLBACK = 4
     const val SPAN_Y = 2
@@ -180,7 +240,14 @@ object Const {
 
     // ---------------- 附加实例字段 key ----------------
 
+    /** 预览容器上挂的 GridPreviewContainer 算法辅助类 */
     const val KEY_HELPER = "home18grid_container_helper"
+
+    /**
+     * FolderCling 独立动画载体（FolderIcon 实例）上挂的 GridSpec，
+     * loadAnimFolderIcon 时据此对载体应用对应几何参数。
+     */
+    const val KEY_CLING_SPEC = "home18grid_cling_spec"
 
     /** 注入控件在 ViewGroup 中的标记 tag，便于日志与调试时辨认 */
     const val TAG_CHECK_BOX = "home18grid_checkbox"

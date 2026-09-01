@@ -47,7 +47,7 @@ object DataHook {
          */
         XposedHelpers.findAndHookMethod(folderInfo, "isBigFolder", object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
-                if (itemTypeOf(param.thisObject) == Const.FOLDER_18_GRID) {
+                if (Const.isCustomFolder(itemTypeOf(param.thisObject))) {
                     param.result = true
                 }
             }
@@ -55,23 +55,23 @@ object DataHook {
 
         /**
          * 预览图标上限：宿主 0x15 给 7、其余给 12。
-         * 18 宫格需要 21 = 前 17 个大图标 + 第 18 格里的 4 个小图标，
-         * 少于这个数第 18 格的「还有更多」四宫格就没有数据可画。
+         * 各自定义类型按 spec.maxCount：
+         *   6x3 需要 21 = 前 17 大图标 + 末格 4 小图标
+         *   3x1 / 1x3 需要 6 = 前 2 大图标 + 末格 4 小图标
+         * 少于这个数末格的「还有更多」四宫格就没有数据可画。
          */
         XposedHelpers.findAndHookMethod(folderInfo, "getPreviewMaxCount", object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                if (itemTypeOf(param.thisObject) == Const.FOLDER_18_GRID) {
-                    param.result = Const.MAX_COUNT
-                }
+                val spec = Const.specOf(itemTypeOf(param.thisObject)) ?: return
+                param.result = spec.maxCount
             }
         })
 
         /** 尺寸描述字符串（宿主只有 1*1 / 2*2 / 3*3），用于标题与无障碍朗读 */
         XposedHelpers.findAndHookMethod(folderInfo, "getFolderGridSize", object : XC_MethodHook() {
             override fun beforeHookedMethod(param: MethodHookParam) {
-                if (itemTypeOf(param.thisObject) == Const.FOLDER_18_GRID) {
-                    param.result = "${Const.GRID_COLUMNS}*${Const.GRID_ROWS}"
-                }
+                val spec = Const.specOf(itemTypeOf(param.thisObject)) ?: return
+                param.result = "${spec.columns}*${spec.rows}"
             }
         })
     }
@@ -103,8 +103,9 @@ object DataHook {
             controller, "getFolderSpanXFromType", Int::class.javaPrimitiveType,
             object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (param.args[0] != Const.FOLDER_18_GRID) return
-                    param.result = cellCountX(deviceConfigs)
+                    val spec = Const.specOf(param.args[0] as? Int ?: return) ?: return
+                    // spanX = -1 表示占满整行（18 宫格），取桌面列数；否则用固定值
+                    param.result = if (spec.spanX == -1) cellCountX(deviceConfigs) else spec.spanX
                 }
             }
         )
@@ -113,8 +114,8 @@ object DataHook {
             controller, "getFolderSpanYFromType", Int::class.javaPrimitiveType,
             object : XC_MethodHook() {
                 override fun beforeHookedMethod(param: MethodHookParam) {
-                    if (param.args[0] != Const.FOLDER_18_GRID) return
-                    param.result = Const.SPAN_Y
+                    val spec = Const.specOf(param.args[0] as? Int ?: return) ?: return
+                    param.result = spec.spanY
                 }
             }
         )
@@ -157,7 +158,8 @@ object DataHook {
      */
     private fun hookLoaderTask(cl: ClassLoader) {
         val loaderTask = XposedHelpers.findClass(Const.CLS_LOADER_TASK, cl)
-        val typeStr = Const.FOLDER_18_GRID.toString()
+        // 三种自定义类型全部要放行进查询
+        val customTypes = Const.SPECS.keys.map { it.toString() }
 
         XposedHelpers.findAndHookMethod(
             loaderTask, "fromQuery",
@@ -174,25 +176,32 @@ object DataHook {
                     val args = param.args[3] as? Array<String>
                     val sortOrder = param.args[4] as? String
 
-                    if (selection != null) {
-                        val patched = when {
-                            selection == SEL_FOLDER_ITEM ->
-                                "$selection OR itemType=?"
+                    if (selection != null && args != null) {
+                        when {
+                            // 形态 A：getFolderItemCursor 的 "itemType=? OR itemType=? OR itemType=?"
+                            // 每种自定义类型补一个 " OR itemType=?" 并在 args 尾部追加取值
+                            selection == SEL_FOLDER_ITEM -> {
+                                param.args[2] = selection +
+                                    customTypes.joinToString("") { " OR itemType=?" }
+                                param.args[3] = args + customTypes
+                            }
 
-                            selection.contains(SEL_IN_THREE) ->
-                                selection.replace(SEL_IN_THREE, SEL_IN_FOUR)
-
-                            else -> null
-                        }
-
-                        if (patched != null && args != null) {
-                            param.args[2] = patched
-                            param.args[3] = args + typeStr
+                            // 形态 B：first/otherScreen 的 "itemType in(?,?,?)"
+                            // 把占位符扩到 3+N 个，并在 args 尾部追加取值
+                            selection.contains(SEL_IN_THREE) -> {
+                                val extraQ = customTypes.joinToString("") { ",?" }
+                                param.args[2] =
+                                    selection.replace(SEL_IN_THREE, "itemType in(?,?,?$extraQ)")
+                                param.args[3] = args + customTypes
+                            }
                         }
                     }
 
+                    // sortOrder 里的 "2,21,22" 排序白名单也带上新类型
                     if (sortOrder != null && sortOrder.contains(SORT_TYPES)) {
-                        param.args[4] = sortOrder.replace(SORT_TYPES, "$SORT_TYPES,$typeStr")
+                        param.args[4] = sortOrder.replace(
+                            SORT_TYPES, SORT_TYPES + customTypes.joinToString("") { ",$it" }
+                        )
                     }
                 }
             }
@@ -203,7 +212,6 @@ object DataHook {
 
     private const val SEL_FOLDER_ITEM = "itemType=? OR itemType=? OR itemType=?"
     private const val SEL_IN_THREE = "itemType in(?,?,?)"
-    private const val SEL_IN_FOUR = "itemType in(?,?,?,?)"
     private const val SORT_TYPES = "2,21,22"
 
     /**
@@ -269,7 +277,7 @@ object DataHook {
             0, 1, 11, 14, 17 ->
                 m.loadShortcut?.invoke(task, cursor, type, removedList, flag)
 
-            2, 21, 22, Const.FOLDER_18_GRID ->
+            2, 21, 22, Const.FOLDER_18_GRID, Const.FOLDER_3X1, Const.FOLDER_1X3 ->
                 m.loadFolder?.invoke(task, cursor)
 
             4 -> m.loadAppWidget?.invoke(task, cursor)

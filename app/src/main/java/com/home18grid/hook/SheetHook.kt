@@ -16,10 +16,10 @@ import de.robv.android.xposed.XposedHelpers
 import java.util.Locale
 
 /**
- * FolderSheet（长按文件夹 → 「文件夹尺寸」面板）UI 注入。
+ * FolderSheet（长按文件夹 → 「文件夹尺寸」面板）UI 注入，三类型泛化版。
  *
- * 这是模块 v1.0.0 缺的那一层：当时只改了数据与渲染，
- * 面板里没有 18 宫格选项，用户没有入口去切换。
+ * 在宿主 1x1 / 2x2_4 / 2x2_9 三个选项之外，追加三个自定义选项：
+ *   18 格（6x3）、横三格（3x1）、竖三格（1x3），见 Const.SPECS。
  *
  * 宿主面板结构（由 res/NLT.xml 的 aapt xmltree 逐节点核实）：
  *
@@ -28,7 +28,7 @@ import java.util.Locale
  *      └─ ConstraintLayout                                   ← 预览区
  *         ├─ ImageView  folder_picker_select_wallpaper_bg
  *         ├─ ImageView  folder_picker_select_default_folder_bg
- *         ├─ ImageView  folder_picker_select_big_folder_bg    ← 三种大文件夹共用背板
+ *         ├─ ImageView  folder_picker_select_big_folder_bg    ← 大文件夹共用背板
  *         ├─ FolderIconPreviewContainer2X2_4
  *         ├─ FolderIconPreviewContainer2X2_9
  *         └─ VisualCheckGroup  (id/visual_check_group)        ← 选项区
@@ -55,14 +55,17 @@ import java.util.Locale
  * 3. 预览区是 ConstraintLayout，手写 ConstraintSet 需要引 androidx 依赖
  *    并硬编码一堆 anchor id。改为克隆同级 mFolderPickerSelectBigFolderImg2x2_9
  *    的 LayoutParams：约束关系原样继承，宿主改版后自动跟随。
+ *    三个自定义预览叠在同一位置，按当前 spec 切换可见性。
  *
  * 状态全部挂在 sheet 实例的 additional field 上，不用 object 静态变量，
  * 避免多次弹出/多实例时状态串台。
  */
 object SheetHook {
 
-    private const val K_CHECKBOX = "h18_checkbox"
-    private const val K_PREVIEW = "h18_preview"
+    /** sheet 上记 (itemType -> 选项 View) 的附加字段 */
+    private const val K_BOXES = "h18_boxes"
+    /** sheet 上记 (itemType -> 预览容器 View) 的附加字段 */
+    private const val K_PREVIEWS = "h18_previews"
 
     fun install(cl: ClassLoader) {
         val sheet = XposedHelpers.findClass(Const.CLS_FOLDER_SHEET, cl)
@@ -98,6 +101,7 @@ object SheetHook {
         )
     }
 
+    @Suppress("UNCHECKED_CAST")
     private fun injectIfNeeded(sheet: View, cl: ClassLoader) {
         val group = XposedHelpers.getObjectField(sheet, Const.F_VISUAL_CHECK_GROUP) as? ViewGroup
             ?: run {
@@ -106,29 +110,35 @@ object SheetHook {
             }
 
         // 面板复用时 initListener 会再跑一遍；控件还挂在同一个 group 上就不重复注入
-        val existing = checkBoxOf(sheet)
-        if (existing != null && existing.parent === group) return
+        val existing = boxesOf(sheet)
+        if (existing.isNotEmpty() && existing.values.first().parent === group) return
 
         val context = sheet.context
         HostRes.dumpDiagnostics(context)
 
-        val checkBox = buildCheckBox(context, cl)
-        group.addView(checkBox)   // ← id 与 checked 监听由 miuix 自动补齐
-        XposedHelpers.setAdditionalInstanceField(sheet, K_CHECKBOX, checkBox)
+        val boxes = HashMap<Int, View>()
+        for (spec in Const.SPECS.values) {
+            val checkBox = buildCheckBox(context, cl, spec)
+            group.addView(checkBox)   // ← id 与 checked 监听由 miuix 自动补齐
+            boxes[spec.itemType] = checkBox
+        }
+        XposedHelpers.setAdditionalInstanceField(sheet, K_BOXES, boxes)
 
-        injectPreview(sheet, cl)
+        injectPreviews(sheet, cl)
     }
 
     /**
-     * 预览区加一个 FolderIconPreviewContainer2X2_9 实例，交给 6x3 算法接管。
+     * 预览区为每种 spec 各加一个 FolderIconPreviewContainer2X2_9 实例，
+     * 分别挂上对应 GridPreviewContainer 算法，叠在同一位置按类型切换。
      *
      * 注意：不要用三参构造去传 itemType。已由 smali 核实，
      * FolderIconPreviewContainer2X2_9(Context, AttributeSet, int) 的第 3 个参数
      * 一路透传到 ViewGroup(Context, AttributeSet, int)，语义是 defStyleAttr，
-     * 传 0x20018 会被当成主题属性 ID 去解析。这里用两参构造，
+     * 传自定义 itemType 会被当成主题属性 ID 去解析。这里用两参构造，
      * 再显式调 LayoutHook.applyContainerSize() 挂上算法辅助类。
      */
-    private fun injectPreview(sheet: View, cl: ClassLoader) {
+    @Suppress("UNCHECKED_CAST")
+    private fun injectPreviews(sheet: View, cl: ClassLoader) {
         val anchor =
             XposedHelpers.getObjectField(sheet, Const.F_PICKER_BIG_FOLDER_IMG_2X2_9) as? View
                 ?: run {
@@ -137,29 +147,37 @@ object SheetHook {
                 }
         val parent = anchor.parent as? ViewGroup ?: return
 
-        val preview = runCatching {
-            XposedHelpers.newInstance(
-                XposedHelpers.findClass(Const.CLS_PREVIEW_CONTAINER_2X2_9, cl),
-                arrayOf<Class<*>>(
-                    Context::class.java,
-                    android.util.AttributeSet::class.java
-                ),
-                sheet.context, null
-            ) as ViewGroup
-        }.onFailure {
-            XposedBridge.log("[${Const.TAG}] preview container create failed: $it")
-        }.getOrNull() ?: return
+        val previews = HashMap<Int, View>()
+        for (spec in Const.SPECS.values) {
+            val preview = runCatching {
+                XposedHelpers.newInstance(
+                    XposedHelpers.findClass(Const.CLS_PREVIEW_CONTAINER_2X2_9, cl),
+                    arrayOf<Class<*>>(
+                        Context::class.java,
+                        android.util.AttributeSet::class.java
+                    ),
+                    sheet.context, null
+                ) as ViewGroup
+            }.onFailure {
+                XposedBridge.log("[${Const.TAG}] preview container create failed: $it")
+            }.getOrNull() ?: continue
 
-        preview.id = View.generateViewId()
-        preview.visibility = View.GONE
-        preview.clipChildren = false
-        preview.clipToPadding = false
-        preview.layoutParams = cloneLayoutParams(anchor)
-        LayoutHook.applyContainerSize(preview)
+            preview.id = View.generateViewId()
+            preview.visibility = View.GONE
+            preview.clipChildren = false
+            preview.clipToPadding = false
+            preview.layoutParams = cloneLayoutParams(anchor)
+            LayoutHook.applyContainerSize(preview, spec)
 
-        parent.addView(preview, parent.indexOfChild(anchor) + 1)
-        XposedHelpers.setAdditionalInstanceField(sheet, K_PREVIEW, preview)
+            parent.addView(preview, parent.indexOfChild(anchor) + 1)
+            previews[spec.itemType] = preview
+        }
+        XposedHelpers.setAdditionalInstanceField(sheet, K_PREVIEWS, previews)
     }
+
+    // ------------------------------------------------------------------
+    // 1.5 选项构建
+    // ------------------------------------------------------------------
 
     /**
      * 复刻宿主 VisualCheckBox 的三层结构。
@@ -167,7 +185,7 @@ object SheetHook {
      * 三个自定义类任一实例化失败时逐级退化为 LinearLayout / ImageView / TextView：
      * 此时少了选中动效，但选项照样出现且能点，不会因为换 ROM 版本整个功能消失。
      */
-    private fun buildCheckBox(context: Context, cl: ClassLoader): View {
+    private fun buildCheckBox(context: Context, cl: ClassLoader, spec: Const.GridSpec): View {
         val box = newView(context, cl, Const.CLS_VISUAL_CHECK_BOX) ?: LinearLayout(context)
         if (box is LinearLayout) {
             box.orientation = LinearLayout.VERTICAL   // VisualCheckBox 构造里已设，退化路径补上
@@ -220,7 +238,7 @@ object SheetHook {
         // --- 标题 ---
         val text = (newView(context, cl, Const.CLS_VISUAL_CHECKED_TEXT_VIEW) as? TextView)
             ?: TextView(context)
-        text.text = optionLabel()
+        text.text = optionLabel(spec)
         text.gravity = Gravity.CENTER
         text.maxLines = 1
 
@@ -250,11 +268,18 @@ object SheetHook {
     }
 
     /**
-     * 选项文案。宿主 folder_picker_big_2x2_9_text 是九宫格的（中文"超大"/英文 XXL），
-     * 不能直接借用，否则两个选项同名。这里自己给：中文环境「18 格」，其余「6x3」。
+     * 选项文案。宿主 folder_picker_big_2x2_9_text 是九宫格的（中文「超大」/英文 XXL），
+     * 不能直接借用，否则两个选项同名。
      */
-    private fun optionLabel(): String =
-        if (Locale.getDefault().language == "zh") "18 格" else "6x3"
+    private fun optionLabel(spec: Const.GridSpec): String =
+        if (Locale.getDefault().language == "zh") {
+            when (spec.itemType) {
+                Const.FOLDER_18_GRID -> "18 格"
+                Const.FOLDER_3X1 -> "横三格"
+                Const.FOLDER_1X3 -> "竖三格"
+                else -> "${spec.columns}x${spec.rows}"
+            }
+        } else "${spec.columns}x${spec.rows}"
 
     // ------------------------------------------------------------------
     // 2. 选中回调
@@ -262,7 +287,7 @@ object SheetHook {
 
     /**
      * 宿主 onCheckedChanged(VisualCheckGroup, int) 逐个比对三个内置 CheckBox 的 id，
-     * 我们的 id 落不到任何分支（相当于 no-op），所以在 after 里补一个分支即可，
+     * 我们的 id 落不到任何分支（相当于 no-op），所以在 after 里补分支即可，
      * 完全不影响宿主原有逻辑，也不会和别的模块的 after hook 抢。
      */
     private fun hookGroupCheckedChanged(sheetClass: Class<*>) {
@@ -278,24 +303,32 @@ object SheetHook {
         XposedBridge.hookMethod(method, object : XC_MethodHook() {
             override fun afterHookedMethod(param: MethodHookParam) {
                 val sheet = param.thisObject as? View ?: return
-                val box = checkBoxOf(sheet) ?: return
-                if (param.args[1] != box.id) return
-                runCatching { switchTo18Grid(sheet) }.onFailure {
-                    XposedBridge.log("[${Const.TAG}] switchTo18Grid failed: $it")
+                val checkedId = param.args[1] as? Int ?: return
+                val spec = specOfBox(sheet, checkedId) ?: return
+                runCatching { switchToSpec(sheet, spec) }.onFailure {
+                    XposedBridge.log("[${Const.TAG}] switchToSpec failed: $it")
                 }
             }
         })
     }
 
+    /** 按 view id 反查它是哪个 spec 的选项 */
+    private fun specOfBox(sheet: View, viewId: Int): Const.GridSpec? {
+        for ((type, box) in boxesOf(sheet)) {
+            if (box.id == viewId) return Const.specOf(type)
+        }
+        return null
+    }
+
     /**
-     * 切到 18 宫格，对应宿主的 switchToBigFolder2x2_9()：
-     *   隐藏另外两种预览 → 显示自己的 → 开启应用推荐 → 记下 mFolderType。
+     * 切到自定义类型，对应宿主的 switchToBigFolder2x2_9()：
+     *   隐藏另外三种预览 → 显示自己的 → 开启应用推荐 → 记下 mFolderType。
      *
      * mFolderType 是点「确定」时 onClick 读出来传给
      * ConvertSizeController.convertFolderSize(info, mFolderType) 的值，
      * 是整条切换链真正的落地点。
      */
-    private fun switchTo18Grid(sheet: View) {
+    private fun switchToSpec(sheet: View, spec: Const.GridSpec) {
         callVoid(sheet, "setDefaultFolderGone")
         callVoid(sheet, "setBigFolderGone2x2_4")
         callVoid(sheet, "setBigFolderGone2x2_9")
@@ -303,14 +336,22 @@ object SheetHook {
         // setBigFolderGone2x2_9 把共用背板也隐藏了，这里单独恢复
         (XposedHelpers.getObjectField(sheet, Const.F_PICKER_BIG_FOLDER_BG) as? View)
             ?.visibility = View.VISIBLE
-        previewOf(sheet)?.visibility = View.VISIBLE
 
-        // 18 格容量足够，与宿主九宫格一致地开放"智能推荐应用"
-        runCatching { XposedHelpers.callMethod(sheet, "configAppPredict", true) }
+        // 只显示当前 spec 的预览，其余两个自定义预览也藏起来
+        for ((type, preview) in previewsOf(sheet)) {
+            preview.visibility = if (type == spec.itemType) View.VISIBLE else View.GONE
+        }
 
-        runCatching { XposedHelpers.setIntField(sheet, Const.F_FOLDER_TYPE, Const.FOLDER_18_GRID) }
+        // 18 格容量足够开放「智能推荐应用」；三宫格只有 3 格，关掉才有意义
+        runCatching {
+            XposedHelpers.callMethod(sheet, "configAppPredict", spec.itemType == Const.FOLDER_18_GRID)
+        }
 
-        checkBoxOf(sheet)?.let { runCatching { XposedHelpers.callMethod(it, "setChecked", true) } }
+        runCatching { XposedHelpers.setIntField(sheet, Const.F_FOLDER_TYPE, spec.itemType) }
+
+        boxesOf(sheet)[spec.itemType]?.let {
+            runCatching { XposedHelpers.callMethod(it, "setChecked", true) }
+        }
     }
 
     /**
@@ -323,9 +364,11 @@ object SheetHook {
             object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val sheet = param.thisObject as? View ?: return
-                    val box = checkBoxOf(sheet) ?: return
-                    if (param.args[0] == Const.FOLDER_18_GRID) return
-                    runCatching { XposedHelpers.callMethod(box, "setChecked", false) }
+                    val type = param.args[0] as? Int ?: return
+                    if (Const.isCustomFolder(type)) return
+                    for (box in boxesOf(sheet).values) {
+                        runCatching { XposedHelpers.callMethod(box, "setChecked", false) }
+                    }
                 }
             }
         )
@@ -337,7 +380,7 @@ object SheetHook {
 
     /**
      * initPreviewIcon() 按当前 itemType 决定给哪个容器塞 FolderPreviewIconView
-     * 并调 loadItemIcons。0x20018 会落到 else 分支（当普通文件夹处理），
+     * 并调 loadItemIcons。自定义类型会落到 else 分支（当普通文件夹处理），
      * 所以在 after 里补上自己那一份，流程照抄 initFolderPreviewIcon2x2_9()。
      */
     private fun hookPreviewInit(sheetClass: Class<*>, cl: ClassLoader) {
@@ -346,20 +389,26 @@ object SheetHook {
             object : XC_MethodHook() {
                 override fun afterHookedMethod(param: MethodHookParam) {
                     val sheet = param.thisObject as? View ?: return
-                    val preview = previewOf(sheet) ?: return
                     val info = XposedHelpers.getObjectField(sheet, Const.F_FOLDER_INFO) ?: return
-                    if (DataHook.itemTypeOf(info) != Const.FOLDER_18_GRID) return
+                    val spec = Const.specOf(DataHook.itemTypeOf(info)) ?: return
+                    val preview = previewsOf(sheet)[spec.itemType] ?: return
 
-                    runCatching { loadPreview(sheet, preview, info, cl) }.onFailure {
+                    runCatching { loadPreview(sheet, preview, info, spec, cl) }.onFailure {
                         XposedBridge.log("[${Const.TAG}] loadPreview failed: $it")
                     }
-                    runCatching { switchTo18Grid(sheet) }
+                    runCatching { switchToSpec(sheet, spec) }
                 }
             }
         )
     }
 
-    private fun loadPreview(sheet: View, preview: View, info: Any, cl: ClassLoader) {
+    private fun loadPreview(
+        sheet: View,
+        preview: View,
+        info: Any,
+        spec: Const.GridSpec,
+        cl: ClassLoader
+    ) {
         val iconCache = XposedHelpers.getObjectField(sheet, Const.F_ICON_CACHE)
         val executor = XposedHelpers.getObjectField(sheet, Const.F_SERIAL_EXECUTOR)
         val predictOn = runCatching {
@@ -372,7 +421,7 @@ object SheetHook {
         val count = runCatching { XposedHelpers.callMethod(info, "count") as Int }.getOrDefault(0)
         val iconViewClass = XposedHelpers.findClass(Const.CLS_PREVIEW_ICON_VIEW, cl)
 
-        repeat(minOf(Const.MAX_COUNT, count)) {
+        repeat(minOf(spec.maxCount, count)) {
             val iconView = XposedHelpers.newInstance(iconViewClass, sheet.context)
             XposedHelpers.callMethod(preview, "addPreView", iconView)
         }
@@ -401,7 +450,9 @@ object SheetHook {
                     object : XC_MethodHook() {
                         override fun afterHookedMethod(param: MethodHookParam) {
                             val sheet = param.thisObject as? View ?: return
-                            previewOf(sheet)?.visibility = View.GONE
+                            for (preview in previewsOf(sheet).values) {
+                                preview.visibility = View.GONE
+                            }
                         }
                     }
                 )
@@ -423,9 +474,8 @@ object SheetHook {
                         val type = runCatching {
                             XposedHelpers.getIntField(param.thisObject, Const.F_FOLDER_TYPE)
                         }.getOrDefault(-1)
-                        if (type == Const.FOLDER_18_GRID) {
-                            param.result = "${Const.GRID_COLUMNS}*${Const.GRID_ROWS}"
-                        }
+                        val spec = Const.specOf(type) ?: return
+                        param.result = "${spec.columns}*${spec.rows}"
                     }
                 }
             )
@@ -436,11 +486,15 @@ object SheetHook {
     // 工具
     // ------------------------------------------------------------------
 
-    private fun checkBoxOf(sheet: Any) =
-        XposedHelpers.getAdditionalInstanceField(sheet, K_CHECKBOX) as? View
+    @Suppress("UNCHECKED_CAST")
+    private fun boxesOf(sheet: Any): Map<Int, View> =
+        XposedHelpers.getAdditionalInstanceField(sheet, K_BOXES) as? Map<Int, View>
+            ?: emptyMap()
 
-    private fun previewOf(sheet: Any) =
-        XposedHelpers.getAdditionalInstanceField(sheet, K_PREVIEW) as? View
+    @Suppress("UNCHECKED_CAST")
+    private fun previewsOf(sheet: Any): Map<Int, View> =
+        XposedHelpers.getAdditionalInstanceField(sheet, K_PREVIEWS) as? Map<Int, View>
+            ?: emptyMap()
 
     private fun callVoid(target: Any, name: String) {
         runCatching { XposedHelpers.callMethod(target, name) }
