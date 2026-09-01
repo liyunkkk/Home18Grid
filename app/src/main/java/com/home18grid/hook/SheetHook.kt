@@ -181,7 +181,7 @@ object SheetHook {
         val darkMode = (context.resources.configuration.uiMode and
             Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
         val fillColor = if (darkMode) 0x59FFFFFF.toInt() else 0x331A1A1A
-        val strokeColor = if (darkMode) 0xCCFFFFFF.toInt() else 0x991A1A1A
+        val strokeColor = if (darkMode) 0xCCFFFFFF.toInt() else 0x991A1A1A.toInt()
 
         val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = fillColor
@@ -252,7 +252,7 @@ object SheetHook {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val sheet = param.thisObject as? View ?: return
                     val checkedId = param.args[1] as Int
-                    val boxes = XposedHelpers.getAdditionalInstanceField(sheet, boxesField)
+                    val boxes = XposedHelpers.getAdditionalInstanceField(sheet, K_BOXES)
                         as? Map<Int, View> ?: return
 
                     // 命中自定义 box：拦截宿主（宿主不认这个 id 会静默 return），执行切换
