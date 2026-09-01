@@ -1,7 +1,13 @@
 package com.home18grid.hook
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -16,23 +22,24 @@ import de.robv.android.xposed.XposedHelpers
 import java.util.Locale
 
 /**
- * FolderSheet（长按文件夹 → 「文件夹尺寸」面板）UI 注入。
+ * FolderSheet（长按文件夹 → 「文件夹尺寸」面板）UI 注入与严格单选管理。
  *
- * 解决两大核心问题：
- * 1. 选项互斥：在切换和同步时显式管理所有自定义 CheckBox 的勾选状态，杜绝多选冲突。
- * 2. 预览定位：直接复用宿主原生的 mFolderPickerSelectBigFolderImg2x2_9 预览容器，
- *    不动态 new View，100% 保留原生 ConstraintLayout 约束，从根本上杜绝图标飘到 (0,0)。
+ * 核心机制：
+ * 1. 严格单选互斥：集中通过 [selectOption] 统一管理宿主 3 个原生 CheckBox 与所有自定义 CheckBox，
+ *    彻底解决多选冲突、亮多个蓝框或无法切换的问题。
+ * 2. 动态选项图标：为 18 格 (6x3)、横三格 (3x1)、竖三格 (1x3) 动态生成高保真微缩栅格图标，
+ *    告别千篇一律的九宫格占位图。
+ * 3. 稳健的预览容器接管：复用原生 2x2_9 约束背板，杜绝漂浮与定位错乱。
  */
 object SheetHook {
 
-    /** sheet 上记 (itemType -> 选项 View) 的附加字段 */
     private const val K_BOXES = "h18_boxes"
 
     fun install(cl: ClassLoader) {
         val sheet = XposedHelpers.findClass(Const.CLS_FOLDER_SHEET, cl)
 
         hookInject(sheet, cl)
-        hookGroupCheckedChanged(sheet, cl)
+        hookHostSwitchMethods(sheet)
         hookCheckedSync(sheet)
         hookPreviewInit(sheet, cl)
         hookVisibilityReset(sheet)
@@ -63,25 +70,42 @@ object SheetHook {
             ?: return
 
         val existing = boxesOf(sheet)
-        if (existing.isNotEmpty() && existing.values.first().parent === group) return
+        if (existing.isNotEmpty() && existing.values.first().parent === group) {
+            val curType = runCatching {
+                XposedHelpers.getIntField(sheet, Const.F_FOLDER_TYPE)
+            }.getOrDefault(-1)
+            selectOption(sheet, curType)
+            return
+        }
 
         val context = sheet.context
         val boxes = HashMap<Int, View>()
         for (spec in Const.SPECS.values) {
-            val checkBox = buildCheckBox(context, cl, spec)
+            val checkBox = buildCheckBox(sheet, context, cl, spec)
             group.addView(checkBox)
             boxes[spec.itemType] = checkBox
         }
         XposedHelpers.setAdditionalInstanceField(sheet, K_BOXES, boxes)
+
+        val curType = runCatching {
+            XposedHelpers.getIntField(sheet, Const.F_FOLDER_TYPE)
+        }.getOrDefault(-1)
+        selectOption(sheet, curType)
     }
 
-    private fun buildCheckBox(context: Context, cl: ClassLoader, spec: Const.GridSpec): View {
+    private fun buildCheckBox(
+        sheet: View,
+        context: Context,
+        cl: ClassLoader,
+        spec: Const.GridSpec
+    ): View {
         val box = newView(context, cl, Const.CLS_VISUAL_CHECK_BOX) ?: LinearLayout(context)
         if (box is LinearLayout) {
             box.orientation = LinearLayout.VERTICAL
             box.clipChildren = false
             box.clipToPadding = false
         }
+        box.id = View.generateViewId()
         box.tag = Const.TAG_CHECK_BOX
         box.isFocusable = true
         box.isClickable = true
@@ -98,9 +122,10 @@ object SheetHook {
         val image = ImageView(context)
         image.scaleType = ImageView.ScaleType.FIT_XY
         image.isDuplicateParentStateEnabled = true
-        HostRes.drawable(context, Const.RES_DRAWABLE_BORDER_2X2_9)?.let { image.setImageDrawable(it) }
 
-        val imageSize = if (bgWidth > 0) bgWidth else ViewGroup.LayoutParams.WRAP_CONTENT
+        val imageSize = if (bgWidth > 0) bgWidth else dp2px(context, 48f)
+        image.setImageDrawable(createOptionThumbnailDrawable(context, spec, imageSize))
+
         frame.addView(image, FrameLayout.LayoutParams(imageSize, imageSize))
 
         (border as? ViewGroup)?.addView(
@@ -140,7 +165,69 @@ object SheetHook {
             ).apply { gravity = Gravity.CENTER_HORIZONTAL }
         )
 
+        box.setOnClickListener {
+            selectOption(sheet, spec.itemType)
+            switchToSpec(sheet, spec, cl)
+        }
+
         return box
+    }
+
+    /**
+     * 动态生成选项微缩网格图标：
+     * - 18格 (6x3): 绘制 6 列 x 3 行微缩矩阵
+     * - 横三格 (3x1): 绘制 3 列 x 1 行水平条状微缩矩阵
+     * - 竖三格 (1x3): 绘制 1 列 x 3 行垂直条状微缩矩阵
+     */
+    private fun createOptionThumbnailDrawable(
+        context: Context,
+        spec: Const.GridSpec,
+        sizePx: Int
+    ): Drawable {
+        val size = if (sizePx > 0) sizePx else dp2px(context, 48f)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+
+        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#44FFFFFF")
+            style = Paint.Style.FILL
+        }
+        val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.parseColor("#88FFFFFF")
+            style = Paint.Style.STROKE
+            strokeWidth = dp2px(context, 0.8f).toFloat()
+        }
+
+        val padding = size * 0.14f
+        val contentW = size - padding * 2
+        val contentH = size - padding * 2
+
+        val cols = spec.columns
+        val rows = spec.rows
+
+        val gap = dp2px(context, 1.5f).toFloat()
+        val cellW = (contentW - gap * (cols - 1)) / cols
+        val cellH = (contentH - gap * (rows - 1)) / rows
+        val cellSize = minOf(cellW, cellH)
+
+        val totalW = cols * cellSize + (cols - 1) * gap
+        val totalH = rows * cellSize + (rows - 1) * gap
+
+        val startX = (size - totalW) / 2f
+        val startY = (size - totalH) / 2f
+        val cornerRadius = cellSize * 0.28f
+
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                val left = startX + c * (cellSize + gap)
+                val top = startY + r * (cellSize + gap)
+                val rect = RectF(left, top, left + cellSize, top + cellSize)
+                canvas.drawRoundRect(rect, cornerRadius, cornerRadius, fillPaint)
+                canvas.drawRoundRect(rect, cornerRadius, cornerRadius, strokePaint)
+            }
+        }
+
+        return BitmapDrawable(context.resources, bitmap)
     }
 
     private fun optionLabel(spec: Const.GridSpec): String =
@@ -154,54 +241,69 @@ object SheetHook {
         } else "${spec.columns}x${spec.rows}"
 
     // ------------------------------------------------------------------
-    // 2. 选中回调与互斥控制
+    // 2. 集中式单选互斥控制
     // ------------------------------------------------------------------
 
-    private fun hookGroupCheckedChanged(sheetClass: Class<*>, cl: ClassLoader) {
-        val method = sheetClass.declaredMethods.firstOrNull {
-            it.name == "onCheckedChanged" &&
-                it.parameterTypes.size == 2 &&
-                it.parameterTypes[1] == Int::class.javaPrimitiveType
-        } ?: return
+    fun selectOption(sheet: View, targetType: Int) {
+        val defaultBox = XposedHelpers.getObjectField(sheet, Const.F_DEFAULT_FOLDER_CHECK_BOX) as? View
+        val box2x2_4 = XposedHelpers.getObjectField(sheet, Const.F_BIG_FOLDER_CHECK_BOX_2X2_4) as? View
+        val box2x2_9 = XposedHelpers.getObjectField(sheet, Const.F_BIG_FOLDER_CHECK_BOX_2X2_9) as? View
 
-        XposedBridge.hookMethod(method, object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                val sheet = param.thisObject as? View ?: return
-                val checkedId = param.args[1] as? Int ?: return
-                val spec = specOfBox(sheet, checkedId) ?: return
-                runCatching { switchToSpec(sheet, spec, cl) }.onFailure {
-                    XposedBridge.log("[${Const.TAG}] switchToSpec failed: $it")
-                }
-            }
-        })
-    }
+        runCatching { XposedHelpers.callMethod(defaultBox, "setChecked", targetType == Const.FOLDER_NORMAL) }
+        runCatching { XposedHelpers.callMethod(box2x2_4, "setChecked", targetType == Const.FOLDER_2X2_4) }
+        runCatching { XposedHelpers.callMethod(box2x2_9, "setChecked", targetType == Const.FOLDER_2X2_9) }
 
-    private fun specOfBox(sheet: View, viewId: Int): Const.GridSpec? {
-        for ((type, box) in boxesOf(sheet)) {
-            if (box.id == viewId) return Const.specOf(type)
-        }
-        return null
-    }
-
-    /**
-     * 切换到自定义尺寸：
-     * 1. 互斥设置所有自定义 CheckBox 的状态（选中的为 true，其余为 false）
-     * 2. 隐藏宿主其它预览，复用原生 2x2_9 预览容器并重新按 spec 装载数据
-     */
-    private fun switchToSpec(sheet: View, spec: Const.GridSpec, cl: ClassLoader) {
-        // 1. 严格互斥管理全部自定义 CheckBox
-        for ((type, box) in boxesOf(sheet)) {
-            val isTarget = (type == spec.itemType)
+        for ((specType, box) in boxesOf(sheet)) {
+            val isTarget = (specType == targetType)
             runCatching { XposedHelpers.callMethod(box, "setChecked", isTarget) }
         }
+    }
 
-        // 2. 面板隐藏 1x1 和 2x2_4 预览，展示共用大背板
+    private fun hookHostSwitchMethods(sheetClass: Class<*>) {
+        val methods = arrayOf(
+            "switchToDefaultFolder" to Const.FOLDER_NORMAL,
+            "switchToBigFolder2x2_4" to Const.FOLDER_2X2_4,
+            "switchToBigFolder2x2_9" to Const.FOLDER_2X2_9
+        )
+        for ((name, type) in methods) {
+            runCatching {
+                XposedHelpers.findAndHookMethod(
+                    sheetClass, name,
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            val sheet = param.thisObject as? View ?: return
+                            selectOption(sheet, type)
+                        }
+                    }
+                )
+            }
+        }
+    }
+
+    private fun hookCheckedSync(sheetClass: Class<*>) {
+        XposedHelpers.findAndHookMethod(
+            sheetClass, "setCheckedBox", Int::class.javaPrimitiveType,
+            object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val sheet = param.thisObject as? View ?: return
+                    val type = param.args[0] as? Int ?: return
+                    selectOption(sheet, type)
+                    if (Const.isCustomFolder(type)) {
+                        runCatching { XposedHelpers.setIntField(sheet, Const.F_FOLDER_TYPE, type) }
+                    }
+                }
+            }
+        )
+    }
+
+    private fun switchToSpec(sheet: View, spec: Const.GridSpec, cl: ClassLoader) {
+        selectOption(sheet, spec.itemType)
+
         callVoid(sheet, "setDefaultFolderGone")
         callVoid(sheet, "setBigFolderGone2x2_4")
         (XposedHelpers.getObjectField(sheet, Const.F_PICKER_BIG_FOLDER_BG) as? View)
             ?.visibility = View.VISIBLE
 
-        // 3. 复用宿主原生 2x2_9 预览容器
         val preview = XposedHelpers.getObjectField(sheet, Const.F_PICKER_BIG_FOLDER_IMG_2X2_9) as? View
         if (preview != null) {
             preview.visibility = View.VISIBLE
@@ -218,24 +320,6 @@ object SheetHook {
             XposedHelpers.callMethod(sheet, "configAppPredict", spec.itemType == Const.FOLDER_18_GRID)
         }
         runCatching { XposedHelpers.setIntField(sheet, Const.F_FOLDER_TYPE, spec.itemType) }
-    }
-
-    /** 宿主 setCheckedBox 触发时同步取消所有自定义 box 的高亮（切换到 1x1/2x2/九宫格时） */
-    private fun hookCheckedSync(sheetClass: Class<*>) {
-        XposedHelpers.findAndHookMethod(
-            sheetClass, "setCheckedBox", Int::class.javaPrimitiveType,
-            object : XC_MethodHook() {
-                override fun afterHookedMethod(param: MethodHookParam) {
-                    val sheet = param.thisObject as? View ?: return
-                    val type = param.args[0] as? Int ?: return
-                    // 切到宿主原生类型（2, 21, 22）时，全部取消勾选
-                    for ((specType, box) in boxesOf(sheet)) {
-                        val isTarget = (specType == type)
-                        runCatching { XposedHelpers.callMethod(box, "setChecked", isTarget) }
-                    }
-                }
-            }
-        )
     }
 
     // ------------------------------------------------------------------
@@ -272,7 +356,6 @@ object SheetHook {
             ) as Boolean
         }.getOrDefault(false)
 
-        // 清理已有子 View 并重新填充对应数量的 PreviewIconView
         if (preview is ViewGroup) {
             preview.removeAllViews()
         }
@@ -293,7 +376,6 @@ object SheetHook {
         )
     }
 
-    /** 切回宿主原生 1x1 / 2x2_4 时重置 helper 避免污染 */
     private fun hookVisibilityReset(sheetClass: Class<*>) {
         for (name in arrayOf("setDefaultFolderVisible", "setBigFolderVisible2x2_4")) {
             runCatching {
@@ -305,7 +387,6 @@ object SheetHook {
                             val preview = XposedHelpers.getObjectField(
                                 sheet, Const.F_PICKER_BIG_FOLDER_IMG_2X2_9
                             ) as? View ?: return
-                            // 摘掉自定义 helper
                             XposedHelpers.setAdditionalInstanceField(preview, Const.KEY_HELPER, null)
                         }
                     }
@@ -358,4 +439,9 @@ object SheetHook {
         }.onFailure {
             XposedBridge.log("[${Const.TAG}] instantiate $className failed: $it")
         }.getOrNull()
+
+    private fun dp2px(context: Context, dp: Float): Int =
+        TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_DIP, dp, context.resources.displayMetrics
+        ).toInt()
 }

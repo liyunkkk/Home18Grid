@@ -504,5 +504,56 @@ object LayoutHook {
                 param.result = spec.gridCount - 1
             }
         })
+
+        // 3. 收起动画（全屏文件夹返回桌面）平滑补间：
+        // 在收起动画开始时，确保桌面容器上的全部 18 个图标同步淡入，
+        // 并在动画结束时保证所有图标处于完全可见与正确缩放状态，杜绝后排图标卡顿滞后冒出。
+        val preFolderGridAnim = controller.declaredMethods.firstOrNull {
+            it.name == "preFolderGridAnim" && it.parameterTypes.size == 2
+        }
+        if (preFolderGridAnim != null) {
+            XposedBridge.hookMethod(preFolderGridAnim, object : XC_MethodHook() {
+                override fun beforeHookedMethod(param: MethodHookParam) {
+                    val isFolderOpen = param.args[0] as? Boolean ?: return
+                    if (!isFolderOpen) {
+                        val desktopIcon = runCatching {
+                            XposedHelpers.getObjectField(param.thisObject, "mFolderDesktopIcon") as? View
+                        }.getOrNull() ?: return
+                        if (specOfIcon(desktopIcon) == null) return
+                        val container = runCatching {
+                            XposedHelpers.callMethod(desktopIcon, "getMPreviewContainer") as? ViewGroup
+                        }.getOrNull() ?: return
+                        for (i in 0 until container.childCount) {
+                            val child = container.getChildAt(i) ?: continue
+                            child.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(220).start()
+                        }
+                    }
+                }
+            })
+        }
+
+        val folderAnimEnd = controller.declaredMethods.firstOrNull {
+            it.name == "folderAnimEnd" && it.parameterTypes.size == 1
+        }
+        if (folderAnimEnd != null) {
+            XposedBridge.hookMethod(folderAnimEnd, object : XC_MethodHook() {
+                override fun afterHookedMethod(param: MethodHookParam) {
+                    val desktopIcon = runCatching {
+                        XposedHelpers.getObjectField(param.thisObject, "mFolderDesktopIcon") as? View
+                    }.getOrNull() ?: return
+                    if (specOfIcon(desktopIcon) == null) return
+                    val container = runCatching {
+                        XposedHelpers.callMethod(desktopIcon, "getMPreviewContainer") as? ViewGroup
+                    }.getOrNull() ?: return
+                    for (i in 0 until container.childCount) {
+                        val child = container.getChildAt(i) ?: continue
+                        child.alpha = 1f
+                        child.scaleX = 1f
+                        child.scaleY = 1f
+                        child.visibility = View.VISIBLE
+                    }
+                }
+            })
+        }
     }
 }
