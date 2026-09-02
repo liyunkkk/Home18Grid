@@ -3,7 +3,6 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
-
 android {
     namespace = "com.home18grid"
     compileSdk = 35
@@ -15,11 +14,9 @@ android {
         versionCode = 7
         versionName = "1.1.5"
     }
-
     buildFeatures {
         compose = true
     }
-
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -32,9 +29,9 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
+        freeCompilerArgs += listOf("-Xskip-metadata-version-check")
     }
 }
-
 dependencies {
     compileOnly("de.robv.android.xposed:api:82")
 
@@ -44,12 +41,10 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
-
     implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.3")
 }
-
 tasks.withType<com.android.build.gradle.internal.tasks.CheckAarMetadataTask>().configureEach {
     enabled = false
 }
