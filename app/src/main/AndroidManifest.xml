@@ -2,7 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
         android:label="Home18Grid"
-        android:icon="@android:drawable/sym_def_app_icon">
+        android:icon="@android:drawable/sym_def_app_icon"
+        android:supportsRtl="true">
+
         <meta-data
             android:name="xposedmodule"
             android:value="true" />
@@ -15,5 +17,15 @@
         <meta-data
             android:name="xposedscope"
             android:resource="@array/xposedscope" />
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
     </application>
 </manifest>
