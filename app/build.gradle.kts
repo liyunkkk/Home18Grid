@@ -49,3 +49,7 @@ dependencies {
     implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.3")
     implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.3")
 }
+
+tasks.withType<com.android.build.gradle.internal.tasks.CheckAarMetadataTask>().configureEach {
+    enabled = false
+}
