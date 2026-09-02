@@ -103,7 +103,7 @@ fun MainScreen(
     context: Context,
     onRestartLauncher: () -> Unit
 ) {
-    val scrollBehavior = remember { MiuixScrollBehavior() }
+    val scrollBehavior = MiuixScrollBehavior()
     var showRestartDialog by remember { mutableStateOf(false) }
 
     val isXposedActive = remember { checkModuleActive() }
