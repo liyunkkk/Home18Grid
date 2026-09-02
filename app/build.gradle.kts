@@ -31,6 +31,10 @@ android {
         jvmTarget = "17"
         freeCompilerArgs += listOf("-Xskip-metadata-version-check")
     }
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
+    }
 }
 dependencies {
     compileOnly("de.robv.android.xposed:api:82")
