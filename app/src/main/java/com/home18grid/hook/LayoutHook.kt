@@ -49,8 +49,15 @@ object LayoutHook {
     /** cling 上记 (itemType -> 专属动画载体 view id) 的附加字段 */
     private const val KEY_CLING_IDS = "home18grid_cling_ids"
 
-    /** FolderAnimController 上记 setupView 阶段算出的目标 DISPLAY_COUNT_MAX */
-    private const val K_PENDING_DISPLAY_MAX = "home18grid_pending_display_max"
+    /**
+     * setupView 单次调用内传递 spec 的 key（XCallback.Param extra，方法返回即销毁）。
+     * 不能用 setAdditionalInstanceField —— FolderAnimController 由 Folder 长期持有、
+     * 所有文件夹共用，实例级附加字段会泄漏到原生九宫格上（v1.1.3 的回归原因）。
+     */
+    private const val EXTRA_SETUP_SPEC = "home18grid_setup_spec"
+
+    /** FolderAnimController 里展开后的内容网格（收起动画的飞行目标来源） */
+    private const val F_ANIM_GRID_VIEW = "mAnimaFolderGridView"
 
     fun install(cl: ClassLoader) {
         hookClingInflate(cl)
@@ -455,20 +462,31 @@ object LayoutHook {
     private fun hookAnimIconLoc(cl: ClassLoader) {
         val controller = XposedHelpers.findClass(Const.CLS_FOLDER_ANIM_CONTROLLER, cl)
 
-        // 1. 修复 DISPLAY_COUNT_MAX 默认写死 9 的问题（v1.1.3 修正）：
-        // setupView 执行序列：clearAnimList → ... → mDesktopImageViews = 桌面图标.getPreviewArray()
-        // → DISPLAY_COUNT_MAX = getMaxRow() * 3 → initIconLoc。
-        // 必须在 before 里做两件事：
-        //   a) 对桌面图标的预览容器补齐槽位（getItemsMaxCount = 21）并调
-        //      createOrRemoveView() 让 mPvChildList 长度 = min(count, 21)，
-        //      否则 mDesktopImageViews 拷贝出的数组长度不足，
-        //      preFolderGridAnim 中后段图标走 setExposedGridViewItemFolme（直隐）分支。
-        //   b) 修 DISPLAY_COUNT_MAX 的来源：宿主 getMaxRow() 实为
-        //      ceil(adapterCount/3) 经 mFolderRowNumber 全局设置钳制，3 列布局下
-        //      18 个图标 -> row = 6 -> maxRow=6 -> DISPLAY_COUNT_MAX = 18；正确值为
-        //      maxOf(spec.maxCount, gridCount) = 21（含末格 4 小图标）。
-        //      initIconLoc 恒等映射填 0..17、返回 17，余下 18..20 由
-        //      addSmallFolderPreViewAnim 收尾，DISPLAY_COUNT_MAX 只需 >= 需要值。
+        // 1. DISPLAY_COUNT_MAX 的正确处理（v1.1.4 重写）：
+        //
+        // 这个字段的语义是「展开后 FolderGridView 里参与飞行动画的子 View 上限」：
+        //   preFolderGridAnim: mDisplayChildCount = min(gridView.childCount, DISPLAY_COUNT_MAX)
+        //   hideNotDoAnimIcons: 把 [first + DISPLAY_COUNT_MAX, +mFolderColumnCount)
+        //                       这一整行的 item alpha 强制设为 0（动画结束再还原）
+        //
+        // 宿主取值 = FolderGridView.getMaxRow() * mFolderColumnNumber，恰好等于
+        // 展开视图里实际铺出来的格子数，于是被 hide 的那一行必然在屏幕外，看不见。
+        //
+        // v1.1.3 的两个错误：
+        //   a) 值取 maxOf(spec.maxCount, spec.gridCount)。三宫格算出 6，比宿主的 9
+        //      更小 —— hideNotDoAnimIcons 于是把屏内可见的 index 6/7/8 清成透明，
+        //      动画结束再还原，这就是「三宫格从第 7 个图标开始闪现」。
+        //   b) 用 setAdditionalInstanceField 记待写值且从不清除。FolderAnimController
+        //      是 Folder 持有的长生命周期对象、所有文件夹共用，开过三宫格后残留的 6
+        //      会在打开**原生九宫格**时被 after 阶段写回去 —— 这就是「九宫格也从第
+        //      7 个图标开始闪现」，属于我们污染了宿主原生行为。
+        //
+        // v1.1.4 的规则：
+        //   * 只允许抬高、绝不压低：max(宿主值, spec.gridCount)。
+        //     18 宫格映射了 0..17 共 18 个格位，需要 >= 18；三宫格只映射 0..2，
+        //     宿主值本来就够用，保持原样。
+        //   * 用 param 的 per-invocation extra 传递，方法返回即失效，不可能泄漏到
+        //     其它 itemType 的调用上。
         val setupView = controller.declaredMethods.firstOrNull {
             it.name == "setupView" && it.parameterTypes.size == 2
         }
@@ -477,32 +495,37 @@ object LayoutHook {
                 override fun beforeHookedMethod(param: MethodHookParam) {
                     val desktopIcon = param.args[1] as? View ?: return
                     val spec = specOfIcon(desktopIcon) ?: return
-                    // a) 补齐预览槽：对齐 FolderIcon2x2.createOrRemoveView 的数量逻辑
+                    // 补齐预览槽：对齐 FolderIcon2x2.createOrRemoveView 的数量逻辑，
+                    // 否则 mDesktopImageViews 长度不足，后段图标拿不到目标槽位。
                     runCatching {
                         val container = XposedHelpers.callMethod(desktopIcon, "getMPreviewContainer")
                         if (container != null) {
                             applyContainerSize(container as View, spec)
-                            // createOrRemoveView 依赖 mInfo.count() 与 mItemsMaxCount 比对
                             XposedHelpers.callMethod(desktopIcon, "createOrRemoveView")
                         }
                     }.onFailure {
                         XposedBridge.log("[${Const.TAG}] preview slots top-up failed: $it")
                     }
-                    // b) 记下待写入的 DISPLAY_COUNT_MAX（宿主在 after 阶段写默认值，
-                    //    所以这里的值要在 after 再覆盖一次）
-                    XposedHelpers.setAdditionalInstanceField(
-                        param.thisObject, K_PENDING_DISPLAY_MAX, maxOf(spec.maxCount, spec.gridCount)
-                    )
+                    // 只在本次调用内传递，方法返回即销毁
+                    param.setObjectExtra(EXTRA_SETUP_SPEC, spec)
                 }
 
                 override fun afterHookedMethod(param: MethodHookParam) {
-                    val pending = XposedHelpers.getAdditionalInstanceField(
-                        param.thisObject, K_PENDING_DISPLAY_MAX
-                    ) as? Int ?: return
+                    val spec = param.getObjectExtra(EXTRA_SETUP_SPEC) as? Const.GridSpec ?: return
+                    // v1.1.4：不再改写 DISPLAY_COUNT_MAX。
+                    // 映射表已被 initIconLoc 里的 min(gridCount, childCount) 限住，
+                    // 参与飞行的槽位不可能超过网格真实 child 数，宿主原生值本来就够用。
+                    // 任何对该字段的写入都会经由 hideNotDoAnimIcons 影响原生九宫格（v1.1.3 回归原因）。
                     runCatching {
-                        XposedHelpers.setIntField(param.thisObject, Const.F_DISPLAY_COUNT_MAX, pending)
-                    }.onFailure {
-                        XposedBridge.log("[${Const.TAG}] set DISPLAY_COUNT_MAX failed: $it")
+                        val displayMax =
+                            XposedHelpers.getIntField(param.thisObject, Const.F_DISPLAY_COUNT_MAX)
+                        val grid = XposedHelpers.getObjectField(
+                            param.thisObject, F_ANIM_GRID_VIEW
+                        ) as? ViewGroup
+                        XposedBridge.log(
+                            "[${Const.TAG}] setupView type=0x${Integer.toHexString(spec.itemType)}" +
+                                " displayMax=$displayMax child=${grid?.childCount}"
+                        )
                     }
                 }
             })
@@ -530,8 +553,29 @@ object LayoutHook {
                 }
 
                 map.clear()
-                for (i in 0 until spec.gridCount) map[i] = i
-                param.result = spec.gridCount - 1
+                // 只映射「展开后网格里真实存在 child」的格位。
+                // 宿主 preFolderIconAnim 对 mappedGridIndex >= gridView.childCount 的预览槽
+                // 直接 setAlpha(0)（smali cond_76）。18 宫格恒等映射 0..17 时 9..17 全部命中，
+                // 收起期间恒透明、动画结束才被桌面真图标接管 —— 这就是「第 10 个起闪现」。
+                // 把它们排除在映射表外，就会落到宿主 addSmallFolderPreViewAnim 收尾分支
+                // （mResetState: alpha/scale=1 + 弹簧，跟着最后一个大图标的位移飞），
+                // 与九宫格「填 0..8、返回 8、余下 9..11 走小图标动画」的分工完全一致。
+                val childCount = runCatching {
+                    (XposedHelpers.getObjectField(param.thisObject, F_ANIM_GRID_VIEW)
+                        as? ViewGroup)?.childCount ?: 0
+                }.getOrDefault(0)
+                val mapped = minOf(spec.gridCount, childCount)
+                for (i in 0 until mapped) map[i] = i
+                param.result = mapped - 1
+                // 探针：一次装机即可钉死运行时边界，替代静态推导
+                val displayMax = runCatching {
+                    XposedHelpers.getIntField(param.thisObject, Const.F_DISPLAY_COUNT_MAX)
+                }.getOrDefault(-1)
+                XposedBridge.log(
+                    "[${Const.TAG}] initIconLoc type=0x${Integer.toHexString(spec.itemType)}" +
+                        " grid=${spec.gridCount} child=$childCount mapped=$mapped" +
+                        " displayMax=$displayMax cols=${param.args[0]} iconCols=${param.args[1]}"
+                )
             }
         })
 
