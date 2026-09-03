@@ -11,8 +11,8 @@ android {
         applicationId = "com.home18grid"
         minSdk = 28
         targetSdk = 35
-        versionCode = 8
-        versionName = "1.1.6"
+        versionCode = 9
+        versionName = "1.2.0"
     }
     buildFeatures {
         compose = true
@@ -45,9 +45,6 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
-    implementation("top.yukonga.miuix.kmp:miuix-ui-android:0.9.3")
-    implementation("top.yukonga.miuix.kmp:miuix-icons-android:0.9.3")
-    implementation("top.yukonga.miuix.kmp:miuix-preference-android:0.9.3")
 }
 tasks.withType<com.android.build.gradle.internal.tasks.CheckAarMetadataTask>().configureEach {
     enabled = false
