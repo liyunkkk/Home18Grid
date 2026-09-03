@@ -39,12 +39,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         if: github.ref == 'refs/heads/main'
         with:
-          tag_name: v1.0.0-${{ github.run_number }}
-          name: Home18Grid Release v1.0.0-${{ github.run_number }}
+          tag_name: v1.3.0-${{ github.run_number }}
+          name: HyperFree v1.3.0-${{ github.run_number }}
           token: ${{ secrets.GITHUB_TOKEN }}
           files: app/build/outputs/apk/release/*.apk
           body: |
-            HyperOS 18 宫格大文件夹 LSPosed 模块构建产物
-            - 适配 ENH 桌面 (com.miui.home.folder.*)
-            - 6x3 等分微型网格预览
-            - 18 个图标全部支持直接点击启动
+            HyperOS 系统自由定制框架 · LSPosed 模块构建产物
+            - 设置界面：一级分类（桌面）→ 二级独立开关，纯手写 Material 3 Expressive
+            - 跨进程配置：xposedsharedprefs + XSharedPreferences 热读取
+            - 开关仅裁剪尺寸面板选项，不动数据层与渲染层，已有文件夹不丢
+            - 支持规格：18 宫格 6x3 / 横向三宫格 3x1 / 纵向三宫格 1x3

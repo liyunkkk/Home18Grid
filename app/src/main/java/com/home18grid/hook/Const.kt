@@ -12,6 +12,9 @@ object Const {
     const val TAG = "Home18Grid"
     const val HOST = "com.miui.home"
 
+    /** 模块自身包名，宿主进程里用它构造 XSharedPreferences */
+    const val MODULE_PKG = "com.home18grid"
+
     // ================================================================
     // 自定义文件夹类型表
     // ================================================================
@@ -50,6 +53,9 @@ object Const {
      * @param spanX       桌面横向占位（-1 表示运行期取桌面列数，占满整行）
      * @param spanY       桌面纵向占位
      * @param clingViewId FolderCling 里为该类型 addView 的独立动画载体的 view id 名
+     * @param prefKey     该规格的独立开关在 SharedPreferences 中的 key
+     * @param uiTitle     设置界面里的开关标题
+     * @param uiSummary   设置界面里的开关副标题
      */
     class GridSpec(
         val itemType: Int,
@@ -57,7 +63,10 @@ object Const {
         val rows: Int,
         val spanX: Int,
         val spanY: Int,
-        val clingViewId: String
+        val clingViewId: String,
+        val prefKey: String,
+        val uiTitle: String,
+        val uiSummary: String
     ) {
         /** 网格格子总数 */
         val gridCount: Int get() = columns * rows
@@ -72,19 +81,33 @@ object Const {
         val maxCount: Int get() = largeCount + smallCount
     }
 
-    /** 所有自定义类型的几何规格表；itemType -> spec */
+    /** 所有自定义类型的几何规格表（静态全表）；itemType -> spec
+     *
+     * 注意：这里是「模块支持的全部规格」，不代表运行期一定生效。
+     * 运行期是否注入某个规格由 [Feature] 依据用户开关裁剪，
+     * Hook 各层必须走 [Feature] 而不是直接读本表。
+     */
     val SPECS: Map<Int, GridSpec> = linkedMapOf(
         FOLDER_18_GRID to GridSpec(
             itemType = FOLDER_18_GRID, columns = 6, rows = 3,
-            spanX = -1, spanY = 2, clingViewId = "h18g_cling_icon_6x3"
+            spanX = -1, spanY = 2, clingViewId = "h18g_cling_icon_6x3",
+            prefKey = "desktop_folder_18_grid",
+            uiTitle = "十八宫格",
+            uiSummary = "6 × 3 横向占满整行，18 个图标直接点击启动"
         ),
         FOLDER_3X1 to GridSpec(
             itemType = FOLDER_3X1, columns = 3, rows = 1,
-            spanX = 2, spanY = 1, clingViewId = "h18g_cling_icon_3x1"
+            spanX = 2, spanY = 1, clingViewId = "h18g_cling_icon_3x1",
+            prefKey = "desktop_folder_3x1",
+            uiTitle = "横向三宫格",
+            uiSummary = "3 × 1 扁平规格，占 2 × 1 桌面格位"
         ),
         FOLDER_1X3 to GridSpec(
             itemType = FOLDER_1X3, columns = 1, rows = 3,
-            spanX = 1, spanY = 2, clingViewId = "h18g_cling_icon_1x3"
+            spanX = 1, spanY = 2, clingViewId = "h18g_cling_icon_1x3",
+            prefKey = "desktop_folder_1x3",
+            uiTitle = "纵向三宫格",
+            uiSummary = "1 × 3 竖条规格，占 1 × 2 桌面格位"
         )
     )
 

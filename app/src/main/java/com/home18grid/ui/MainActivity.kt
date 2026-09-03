@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
@@ -31,15 +32,18 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.home18grid.hook.Const
 
 class MainActivity : ComponentActivity() {
 
@@ -89,10 +93,19 @@ class MainActivity : ComponentActivity() {
 
 private val NAV_ITEMS = listOf(
     NavItem("状态", NavIcon.Home),
-    NavItem("规格", NavIcon.Puzzle),
+    NavItem("设置", NavIcon.Gear),
     NavItem("操作", NavIcon.Download),
-    NavItem("关于", NavIcon.Gear)
+    NavItem("关于", NavIcon.Info)
 )
+
+/**
+ * 「设置」页的层级路由。
+ *
+ * Root 是一级分类列表（桌面 / 后续更多系统模块），
+ * 其余枚举值各对应一个二级页面。新增分类时在这里加一项即可，
+ * 一级列表与二级内容分别在 [settingsRootTab] / [desktopSettingsTab] 中扩展。
+ */
+private enum class SettingsRoute { Root, Desktop }
 
 @Composable
 fun MainScreen(
@@ -101,13 +114,27 @@ fun MainScreen(
 ) {
     val p = LocalAppPalette.current
     var tab by remember { mutableIntStateOf(0) }
+    var settingsRoute by remember { mutableStateOf(SettingsRoute.Root) }
     var showRestartDialog by remember { mutableStateOf(false) }
 
     val isXposedActive = remember { checkModuleActive() }
     val launcherVersion = remember { getLauncherVersion(context) }
     val moduleVersion = remember { getModuleVersion(context) }
     val moduleVersionFull = remember { getModuleVersionFull(context) }
+    val prefsShared = remember { Settings.isPrefsShared(context) }
     var hideIcon by remember { mutableStateOf(isLauncherIconHidden(context)) }
+
+    // 各规格开关的界面状态；初值从 prefs 读，改动即时落盘供宿主读取
+    val specSwitches = remember {
+        mutableStateMapOf<String, Boolean>().apply {
+            for (spec in Const.SPECS.values) {
+                put(spec.prefKey, Settings.getBool(context, spec.prefKey))
+            }
+        }
+    }
+
+    val inSubPage = tab == 1 && settingsRoute != SettingsRoute.Root
+    BackHandler(enabled = inSubPage) { settingsRoute = SettingsRoute.Root }
 
     val statusBarPad = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     val navBarPad = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
@@ -128,29 +155,37 @@ fun MainScreen(
             verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
             item {
-                Column {
-                    Text(
-                        text = "Home18Grid",
-                        color = p.summaryText,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(start = 6.dp)
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "18 宫格文件夹",
-                        color = p.titleText,
-                        fontSize = 34.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(start = 6.dp, bottom = 6.dp)
-                    )
-                }
+                ScreenHeader(
+                    title = when {
+                        inSubPage -> "桌面"
+                        tab == 0 -> "系统定制框架"
+                        tab == 1 -> "设置"
+                        tab == 2 -> "操作"
+                        else -> "关于"
+                    },
+                    showBack = inSubPage,
+                    onBack = { settingsRoute = SettingsRoute.Root }
+                )
             }
 
-            when (tab) {
-                0 -> statusTab(isXposedActive, launcherVersion, moduleVersion, moduleVersionFull)
-                1 -> specTab()
-                2 -> actionTab(
+            when {
+                tab == 0 -> statusTab(
+                    isXposedActive, launcherVersion, moduleVersion, moduleVersionFull
+                )
+
+                tab == 1 && settingsRoute == SettingsRoute.Root ->
+                    settingsRootTab(onOpenDesktop = { settingsRoute = SettingsRoute.Desktop })
+
+                tab == 1 -> desktopSettingsTab(
+                    prefsShared = prefsShared,
+                    states = specSwitches,
+                    onToggle = { spec, checked ->
+                        specSwitches[spec.prefKey] = checked
+                        Settings.setBool(context, spec.prefKey, checked)
+                    }
+                )
+
+                tab == 2 -> actionTab(
                     hideIcon = hideIcon,
                     onHideIconChange = { checked ->
                         hideIcon = checked
@@ -158,6 +193,7 @@ fun MainScreen(
                     },
                     onRestartClick = { showRestartDialog = true }
                 )
+
                 else -> aboutTab(context)
             }
         }
@@ -165,7 +201,11 @@ fun MainScreen(
         CapsuleNavBar(
             items = NAV_ITEMS,
             selectedIndex = tab,
-            onSelect = { tab = it },
+            onSelect = {
+                // 切走再切回「设置」时回到一级列表，避免停留在旧的二级页面
+                if (it != tab) settingsRoute = SettingsRoute.Root
+                tab = it
+            },
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = navBarPad + 16.dp)
@@ -179,6 +219,38 @@ fun MainScreen(
                 showRestartDialog = false
                 onRestartLauncher()
             }
+        )
+    }
+}
+
+/** 页头：品牌行 + 大标题，二级页面额外带返回按钮 */
+@Composable
+private fun ScreenHeader(
+    title: String,
+    showBack: Boolean,
+    onBack: () -> Unit
+) {
+    val p = LocalAppPalette.current
+    Column {
+        if (showBack) {
+            BackButton(onClick = onBack)
+            Spacer(Modifier.height(10.dp))
+        } else {
+            Text(
+                text = "HyperFree",
+                color = p.summaryText,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 6.dp)
+            )
+            Spacer(Modifier.height(4.dp))
+        }
+        Text(
+            text = title,
+            color = p.titleText,
+            fontSize = 34.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(start = 6.dp, bottom = 6.dp)
         )
     }
 }
@@ -220,38 +292,80 @@ private fun LazyListScope.statusTab(
     }
 }
 
-private fun LazyListScope.specTab() {
+/* ---------- 设置：一级分类列表 ---------- */
+
+private fun LazyListScope.settingsRootTab(onOpenDesktop: () -> Unit) {
     item {
         Column {
-            SectionLabel("文件夹规格")
+            SectionLabel("系统模块")
             ExpressiveCard {
-                InfoRow(
-                    title = "18 宫格文件夹",
-                    summary = "6 × 3 网格布局，18 图标直接启动与平滑收起"
-                )
-                InfoRow(
-                    title = "横向三宫格",
-                    summary = "3 × 1 扁平规格，收起动画对齐原生九宫格"
-                )
-                InfoRow(
-                    title = "纵向三宫格",
-                    summary = "1 × 3 垂直规格，适配侧边竖条布局"
+                CategoryRow(
+                    title = "桌面",
+                    summary = "com.miui.home · 大文件夹规格扩展",
+                    icon = CategoryIcon.Desktop,
+                    onClick = onOpenDesktop
                 )
             }
         }
     }
     item {
         Column {
-            SectionLabel("使用方式")
+            SectionLabel("规划中")
+            ExpressiveCard {
+                CategoryRow(
+                    title = "更多系统模块",
+                    summary = "后续按同一层级接入，一级分类 → 二级独立开关",
+                    icon = CategoryIcon.Sparkle,
+                    enabled = false
+                )
+            }
+        }
+    }
+}
+
+/* ---------- 设置 → 桌面：各规格独立开关 ---------- */
+
+private fun LazyListScope.desktopSettingsTab(
+    prefsShared: Boolean,
+    states: Map<String, Boolean>,
+    onToggle: (Const.GridSpec, Boolean) -> Unit
+) {
+    item {
+        Column {
+            SectionLabel("大文件夹规格")
+            ExpressiveCard {
+                for (spec in Const.SPECS.values) {
+                    SwitchRow(
+                        title = spec.uiTitle,
+                        summary = spec.uiSummary,
+                        checked = states[spec.prefKey] ?: true,
+                        onCheckedChange = { onToggle(spec, it) }
+                    )
+                }
+            }
+        }
+    }
+    item {
+        Column {
+            SectionLabel("生效说明")
             ExpressiveCard {
                 InfoRow(
-                    title = "长按文件夹",
-                    summary = "在弹出的尺寸菜单中选择自定义规格"
+                    title = "开关作用范围",
+                    summary = "关闭后长按文件夹的尺寸面板不再出现该规格；" +
+                        "已经设成该规格的文件夹保持原样，可在面板里改回其它规格"
                 )
                 InfoRow(
-                    title = "配置持久化",
-                    summary = "写入桌面数据库，重启后规格不丢失"
+                    title = "何时生效",
+                    summary = "下次打开尺寸面板即读取，无需重启桌面"
                 )
+                if (!prefsShared) {
+                    InfoRow(
+                        title = "配置未共享",
+                        summary = "当前无法写入 LSPosed 共享配置，开关不会被桌面读取。" +
+                            "请确认模块已在 LSPosed 中启用后重新打开本页",
+                        statusDotColor = Color(0xFFD9382C)
+                    )
+                }
             }
         }
     }
@@ -379,7 +493,7 @@ private fun getLauncherVersion(context: Context): String {
 private fun getModuleVersion(context: Context): String {
     return runCatching {
         "v" + context.packageManager.getPackageInfo(context.packageName, 0).versionName
-    }.getOrDefault("v1.2.0")
+    }.getOrDefault("v1.3.0")
 }
 
 /** 完整版本串（含 versionCode），用于信息行 */
@@ -387,7 +501,7 @@ private fun getModuleVersionFull(context: Context): String {
     return runCatching {
         val pi = context.packageManager.getPackageInfo(context.packageName, 0)
         "v${pi.versionName} (Release) · code ${pi.longVersionCode}"
-    }.getOrDefault("v1.2.0 (Release)")
+    }.getOrDefault("v1.3.0 (Release)")
 }
 
 private fun isLauncherIconHidden(context: Context): Boolean {

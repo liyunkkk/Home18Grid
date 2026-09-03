@@ -6,4 +6,7 @@ local.properties
 .DS_Store
 captures/
 .externalNativeBuild/
+# 本地 CI 辅助脚本（含设备本地路径，不入库）
+.ci_status.sh
+.fetch_apk.sh
 .cxx/

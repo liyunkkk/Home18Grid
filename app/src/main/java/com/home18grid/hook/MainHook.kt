@@ -27,6 +27,8 @@ class MainHook : IXposedHookLoadPackage {
 
         XposedBridge.log("[${Const.TAG}] injected into ${Const.HOST}")
 
+        // 开关必须先于三层 Hook 装载：SheetHook 注入选项时要读它
+        install("Feature") { Feature.install() }
         install("DataHook") { DataHook.install(lpparam.classLoader) }
         install("LayoutHook") { LayoutHook.install(lpparam.classLoader) }
         install("SheetHook") { SheetHook.install(lpparam.classLoader) }

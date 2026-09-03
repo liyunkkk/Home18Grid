@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HyperFree</string>
+    <string name="xposed_description">HyperOS 系统自由定制框架 · 桌面大文件夹规格扩展</string>
+</resources>

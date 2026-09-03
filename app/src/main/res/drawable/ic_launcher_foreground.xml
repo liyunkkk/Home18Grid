@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  HyperFree 图标前景：两行标准格 + 一行「自由合并」长条，
+  语义 = 可自由改变的桌面网格规格。全部内容位于 adaptive icon 安全区（中心 66dp）内。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 第一行：3 个标准格 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M31.5,27 h5 a4.5,4.5 0 0 1 4.5,4.5 v5 a4.5,4.5 0 0 1 -4.5,4.5 h-5 a4.5,4.5 0 0 1 -4.5,-4.5 v-5 a4.5,4.5 0 0 1 4.5,-4.5 z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M51.5,27 h5 a4.5,4.5 0 0 1 4.5,4.5 v5 a4.5,4.5 0 0 1 -4.5,4.5 h-5 a4.5,4.5 0 0 1 -4.5,-4.5 v-5 a4.5,4.5 0 0 1 4.5,-4.5 z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M71.5,27 h5 a4.5,4.5 0 0 1 4.5,4.5 v5 a4.5,4.5 0 0 1 -4.5,4.5 h-5 a4.5,4.5 0 0 1 -4.5,-4.5 v-5 a4.5,4.5 0 0 1 4.5,-4.5 z" />
+
+    <!-- 第二行：3 个标准格（稍降透明度做层次） -->
+    <path
+        android:fillColor="#E8FFFFFF"
+        android:pathData="M31.5,47 h5 a4.5,4.5 0 0 1 4.5,4.5 v5 a4.5,4.5 0 0 1 -4.5,4.5 h-5 a4.5,4.5 0 0 1 -4.5,-4.5 v-5 a4.5,4.5 0 0 1 4.5,-4.5 z" />
+    <path
+        android:fillColor="#E8FFFFFF"
+        android:pathData="M51.5,47 h5 a4.5,4.5 0 0 1 4.5,4.5 v5 a4.5,4.5 0 0 1 -4.5,4.5 h-5 a4.5,4.5 0 0 1 -4.5,-4.5 v-5 a4.5,4.5 0 0 1 4.5,-4.5 z" />
+    <path
+        android:fillColor="#E8FFFFFF"
+        android:pathData="M71.5,47 h5 a4.5,4.5 0 0 1 4.5,4.5 v5 a4.5,4.5 0 0 1 -4.5,4.5 h-5 a4.5,4.5 0 0 1 -4.5,-4.5 v-5 a4.5,4.5 0 0 1 4.5,-4.5 z" />
+
+    <!-- 第三行：整行合并成胶囊，表示自由规格 -->
+    <path
+        android:fillColor="#B8FFFFFF"
+        android:pathData="M34,67 h40 a7,7 0 0 1 0,14 h-40 a7,7 0 0 1 0,-14 z" />
+</vector>

@@ -337,9 +337,184 @@ fun SwitchRow(
     }
 }
 
+/* ============================== 分类入口行 ============================== */
+
+enum class CategoryIcon { Desktop, Sparkle }
+
+/**
+ * 一级分类入口行：左侧色块图标 + 标题副标题 + 右侧箭头。
+ * enabled=false 时用于展示尚未接入的分类（灰底、无箭头、不可点）。
+ */
+@Composable
+fun CategoryRow(
+    title: String,
+    summary: String? = null,
+    icon: CategoryIcon,
+    enabled: Boolean = true,
+    onClick: (() -> Unit)? = null
+) {
+    val p = LocalAppPalette.current
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val bg by animateColorAsState(
+        targetValue = if (pressed) p.cardPressed else Color.Transparent,
+        label = "catBg"
+    )
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.98f else 1f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+        label = "catScale"
+    )
+    val tileBg = if (enabled) p.navSelectedBg else p.cardPressed
+    val tileFg = if (enabled) p.navSelectedFg else p.summaryText
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 1.dp)
+            .graphicsLayer(scaleX = scale, scaleY = scale)
+            .clip(RoundedCornerShape(20.dp))
+            .background(bg)
+            .then(
+                if (enabled && onClick != null) {
+                    Modifier.clickable(
+                        interactionSource = interaction,
+                        indication = null,
+                        onClick = onClick
+                    )
+                } else {
+                    Modifier
+                }
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .clip(RoundedCornerShape(15.dp))
+                .background(tileBg),
+            contentAlignment = Alignment.Center
+        ) {
+            CategoryGlyph(icon = icon, color = tileFg)
+        }
+        Spacer(Modifier.width(14.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                color = if (enabled) p.titleText else p.summaryText,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
+            if (summary != null) {
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    text = summary,
+                    color = p.summaryText,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+        if (enabled) {
+            Spacer(Modifier.width(10.dp))
+            ChevronGlyph(p.summaryText)
+        }
+    }
+}
+
+@Composable
+private fun CategoryGlyph(icon: CategoryIcon, color: Color) {
+    Canvas(modifier = Modifier.size(23.dp)) {
+        val s = size.width
+        when (icon) {
+            // 手机外框 + 内部 2x3 网格点，语义 = 桌面布局
+            CategoryIcon.Desktop -> {
+                drawRoundRect(
+                    color = color,
+                    topLeft = Offset(s * 0.17f, s * 0.05f),
+                    size = Size(s * 0.66f, s * 0.9f),
+                    cornerRadius = CornerRadius(s * 0.16f, s * 0.16f),
+                    style = Stroke(width = s * 0.1f)
+                )
+                val dot = s * 0.105f
+                for (r in 0 until 3) {
+                    for (c in 0 until 2) {
+                        drawRoundRect(
+                            color = color,
+                            topLeft = Offset(
+                                s * 0.31f + c * s * 0.26f,
+                                s * 0.24f + r * s * 0.22f
+                            ),
+                            size = Size(dot, dot),
+                            cornerRadius = CornerRadius(dot * 0.35f, dot * 0.35f)
+                        )
+                    }
+                }
+            }
+
+            // 四角星 + 小星，语义 = 更多待接入能力
+            CategoryIcon.Sparkle -> {
+                fun star(cx: Float, cy: Float, r: Float) {
+                    val path = Path().apply {
+                        moveTo(cx, cy - r)
+                        quadraticBezierTo(cx + r * 0.18f, cy - r * 0.18f, cx + r, cy)
+                        quadraticBezierTo(cx + r * 0.18f, cy + r * 0.18f, cx, cy + r)
+                        quadraticBezierTo(cx - r * 0.18f, cy + r * 0.18f, cx - r, cy)
+                        quadraticBezierTo(cx - r * 0.18f, cy - r * 0.18f, cx, cy - r)
+                        close()
+                    }
+                    drawPath(path, color, style = Fill)
+                }
+                star(s * 0.42f, s * 0.44f, s * 0.36f)
+                star(s * 0.8f, s * 0.79f, s * 0.17f)
+            }
+        }
+    }
+}
+
+/** 二级页面左上角返回按钮（圆形底 + 左箭头） */
+@Composable
+fun BackButton(onClick: () -> Unit) {
+    val p = LocalAppPalette.current
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val bg by animateColorAsState(
+        targetValue = if (pressed) p.cardPressed else p.card,
+        label = "backBg"
+    )
+    Box(
+        modifier = Modifier
+            .size(42.dp)
+            .clip(CircleShape)
+            .background(bg)
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onClick
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.size(18.dp)) {
+            val w = size.width
+            val h = size.height
+            val path = Path().apply {
+                moveTo(w * 0.62f, h * 0.16f)
+                lineTo(w * 0.28f, h * 0.5f)
+                lineTo(w * 0.62f, h * 0.84f)
+            }
+            drawPath(
+                path = path,
+                color = p.titleText,
+                style = Stroke(width = w * 0.16f, cap = StrokeCap.Round)
+            )
+        }
+    }
+}
+
 /* ============================== 底部胶囊导航 ============================== */
 
-enum class NavIcon { Home, Puzzle, Download, Gear }
+enum class NavIcon { Home, Gear, Download, Info }
 
 data class NavItem(val label: String, val icon: NavIcon)
 
@@ -442,25 +617,25 @@ private fun NavGlyph(icon: NavIcon, color: Color, filled: Boolean, punch: Color)
                 }
             }
 
-            NavIcon.Puzzle -> {
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(s * 0.15f, s * 0.27f),
-                    size = Size(s * 0.58f, s * 0.58f),
-                    cornerRadius = CornerRadius(s * 0.12f, s * 0.12f),
-                    style = style
-                )
+            NavIcon.Info -> {
                 drawCircle(
                     color = color,
-                    radius = s * 0.135f,
-                    center = Offset(s * 0.44f, s * 0.21f),
+                    radius = s * 0.43f,
+                    center = Offset(s * 0.5f, s * 0.5f),
                     style = style
                 )
+                val inner = if (filled) punch else color
                 drawCircle(
-                    color = color,
-                    radius = s * 0.135f,
-                    center = Offset(s * 0.79f, s * 0.56f),
-                    style = style
+                    color = inner,
+                    radius = s * 0.065f,
+                    center = Offset(s * 0.5f, s * 0.27f)
+                )
+                drawLine(
+                    color = inner,
+                    start = Offset(s * 0.5f, s * 0.42f),
+                    end = Offset(s * 0.5f, s * 0.73f),
+                    strokeWidth = sw * 1.05f,
+                    cap = StrokeCap.Round
                 )
             }
 

@@ -72,16 +72,38 @@ object SheetHook {
     private fun injectIfNeeded(sheet: View, cl: ClassLoader) {
         val group = XposedHelpers.getObjectField(sheet, Const.F_VISUAL_CHECK_GROUP) as? ViewGroup
             ?: return
+
+        // 每次面板打开都重新取一次开关，改完设置无需重启桌面
+        val enabled = Feature.enabledSpecs()
         val existing = boxesOf(sheet)
-        if (existing.isNotEmpty() && existing.values.first().parent === group) {
-            // 面板复用：仅刷新预览（勾选状态由原生机制维护，不碰）
+        val attached = existing.isNotEmpty() && existing.values.all { it.parent === group }
+
+        if (attached && existing.keys == enabled.mapTo(HashSet<Int>()) { it.itemType }) {
+            // 面板复用且开关未变：仅刷新预览（勾选状态由原生机制维护，不碰）
             refreshSheetPreview(sheet, cl)
             return
         }
 
+        // 首次注入，或用户改了开关：先把旧的自定义 box 全摘掉再按当前开关重建。
+        // 被摘掉的 box 若正处于选中态，mCheckedId 会变成悬空 id，
+        // 原生 tracker 后续取消旧框时会 findViewById 到 null，这里主动清一次。
+        if (existing.isNotEmpty()) {
+            val checkedId = runCatching {
+                XposedHelpers.getIntField(group, "mCheckedId")
+            }.getOrDefault(-1)
+            var checkedRemoved = false
+            for (box in existing.values) {
+                if (box.id == checkedId) checkedRemoved = true
+                (box.parent as? ViewGroup)?.removeView(box)
+            }
+            if (checkedRemoved) {
+                runCatching { XposedHelpers.callMethod(group, "clearCheck") }
+            }
+        }
+
         val context = sheet.context
         val boxes = HashMap<Int, View>()
-        for (spec in Const.SPECS.values) {
+        for (spec in enabled) {
             val checkBox = buildCheckBox(sheet, context, cl, spec)
             group.addView(checkBox)
             boxes[spec.itemType] = checkBox
