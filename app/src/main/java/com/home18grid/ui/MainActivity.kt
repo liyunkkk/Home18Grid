@@ -276,14 +276,15 @@ private fun getLauncherVersion(context: Context): String {
 
 private fun isLauncherIconHidden(context: Context): Boolean {
     val pm = context.packageManager
-    val component = ComponentName(context, MainActivity::class.java)
+    // 仅查询/切换 LAUNCHER alias；MainActivity 本体始终保持启用，
+    // 保证 LSPosed 管理器可以通过 MODULE_SETTINGS 随时打开模块设置
+    val component = ComponentName(context, "com.home18grid.ui.MainActivityAlias")
     val state = pm.getComponentEnabledSetting(component)
     return state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED
 }
-
 private fun setLauncherIconHidden(context: Context, hidden: Boolean) {
     val pm = context.packageManager
-    val component = ComponentName(context, MainActivity::class.java)
+    val component = ComponentName(context, "com.home18grid.ui.MainActivityAlias")
     val newState = if (hidden) {
         PackageManager.COMPONENT_ENABLED_STATE_DISABLED
     } else {
@@ -292,7 +293,7 @@ private fun setLauncherIconHidden(context: Context, hidden: Boolean) {
     pm.setComponentEnabledSetting(component, newState, PackageManager.DONT_KILL_APP)
     Toast.makeText(
         context,
-        if (hidden) "已隐藏桌面图标" else "已显示桌面图标",
+        if (hidden) "图标已隐藏，可从 LSPosed 管理器打开" else "已显示桌面图标",
         Toast.LENGTH_SHORT
     ).show()
 }
